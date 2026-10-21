@@ -1,0 +1,591 @@
+{
+  "entities": {
+    "Season": {
+      "title": "Season",
+      "description": "Tournament season definition (e.g., Season 2 2026, Season 3 2027) with individual rules, budgets and status",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Full season title in Bangla or English"
+        },
+        "code": {
+          "type": "string",
+          "description": "Season code identifier (e.g., S2, S3)"
+        },
+        "year": {
+          "type": "number",
+          "description": "Calendar year of the season"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived", "draft"],
+          "description": "Lifecycle state of the season"
+        },
+        "isLiveAuctionActive": {
+          "type": "boolean",
+          "description": "Whether this season currently hosts the active real-time auction room"
+        },
+        "defaultBudget": {
+          "type": "number",
+          "description": "Allotted team purse in BDT for this season"
+        },
+        "defaultBasePrice": {
+          "type": "number",
+          "description": "Default base price in BDT for draft players"
+        },
+        "defaultMinIncrement": {
+          "type": "number",
+          "description": "Minimum bid increment in BDT"
+        },
+        "defaultTimerSeconds": {
+          "type": "number",
+          "description": "Duration countdown in seconds"
+        },
+        "maxSquadSize": {
+          "type": "number",
+          "description": "Max squad roster capacity"
+        },
+        "regFeeAmount": {
+          "type": "number",
+          "description": "Registration fee in BDT"
+        },
+        "bKashNumber": {
+          "type": "string",
+          "description": "bKash merchant or personal payment number"
+        },
+        "nagadNumber": {
+          "type": "string",
+          "description": "Nagad number"
+        },
+        "rocketNumber": {
+          "type": "string",
+          "description": "Rocket number"
+        },
+        "tournamentRules": {
+          "type": "string",
+          "description": "Specific bylaws, tiebreakers or guidelines"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Season creation ISO timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update ISO timestamp"
+        }
+      },
+      "required": ["name", "code", "year", "status", "defaultBudget"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized league administrator with full auction and management privileges",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "Administrator email address"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"],
+          "description": "Role string"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation"
+        }
+      },
+      "required": ["email", "role"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Authenticated user profile with role and associated team",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "User email address"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "team", "viewer"],
+          "description": "Assigned user role"
+        },
+        "teamId": {
+          "type": "string",
+          "description": "Associated team ID if role is team"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Timestamp of profile creation"
+        }
+      },
+      "required": ["email", "role"]
+    },
+    "Team": {
+      "title": "Team",
+      "description": "Registered tournament team participating in a specific season",
+      "type": "object",
+      "properties": {
+        "seasonId": {
+          "type": "string",
+          "description": "ID of season this team belongs to"
+        },
+        "name": {
+          "type": "string",
+          "description": "Team name in Bengali or English"
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Team owner / manager name"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Contact phone number"
+        },
+        "totalBudget": {
+          "type": "number",
+          "description": "Total allotted purse in BDT"
+        },
+        "spentBudget": {
+          "type": "number",
+          "description": "Total amount spent on acquired players"
+        },
+        "remainingBudget": {
+          "type": "number",
+          "description": "Remaining purse balance in BDT"
+        },
+        "squadCount": {
+          "type": "number",
+          "description": "Current number of players acquired"
+        },
+        "maxSquad": {
+          "type": "number",
+          "description": "Maximum roster capacity"
+        },
+        "logoUrl": {
+          "type": "string",
+          "description": "Team logo URL or icon identifier"
+        },
+        "color": {
+          "type": "string",
+          "description": "Primary team theme color"
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of assigned team manager"
+        },
+        "userEmail": {
+          "type": "string",
+          "description": "Email of assigned team manager"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Record creation timestamp"
+        }
+      },
+      "required": ["name", "totalBudget", "spentBudget", "remainingBudget"]
+    },
+    "Player": {
+      "title": "Player",
+      "description": "Registered football player in a specific season draft pool",
+      "type": "object",
+      "properties": {
+        "seasonId": {
+          "type": "string",
+          "description": "Tournament season ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full player name"
+        },
+        "banglaName": {
+          "type": "string",
+          "description": "Player name in Bangla"
+        },
+        "age": {
+          "type": "number",
+          "description": "Age in years"
+        },
+        "position": {
+          "type": "string",
+          "enum": ["Forward", "Midfielder", "Defender", "Goalkeeper"],
+          "description": "Playing position"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Contact phone number"
+        },
+        "area": {
+          "type": "string",
+          "description": "District or locality in Teesta region"
+        },
+        "jerseySize": {
+          "type": "string",
+          "description": "Jersey size (M, L, XL, XXL)"
+        },
+        "prevClub": {
+          "type": "string",
+          "description": "Previous club or tournament experience"
+        },
+        "regFee": {
+          "type": "number",
+          "description": "Player registration fee in BDT"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "bKash, Nagad, Rocket, or Cash"
+        },
+        "paymentTrxId": {
+          "type": "string",
+          "description": "Transaction reference ID"
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["Paid", "Pending", "Refunded"],
+          "description": "Fee payment verification status"
+        },
+        "approvalStatus": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"],
+          "description": "Admin eligibility approval status"
+        },
+        "basePrice": {
+          "type": "number",
+          "description": "Initial auction base price in BDT"
+        },
+        "auctionStatus": {
+          "type": "string",
+          "enum": ["upcoming", "live", "sold", "unsold"],
+          "description": "Current bidding status"
+        },
+        "winningTeamId": {
+          "type": "string",
+          "description": "ID of buying team if sold"
+        },
+        "winningTeamName": {
+          "type": "string",
+          "description": "Name of buying team"
+        },
+        "finalPrice": {
+          "type": "number",
+          "description": "Closing sold price in BDT"
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "Player avatar or photo URL"
+        },
+        "round": {
+          "type": "number",
+          "description": "Auction pool round"
+        },
+        "formNumber": {
+          "type": "string",
+          "description": "Formatted registration form label (e.g., ফরম নং:- ১)"
+        },
+        "formNumericValue": {
+          "type": "number",
+          "description": "Sequential integer form number (e.g. 1, 2, 3)"
+        },
+        "registrationNumber": {
+          "type": "string",
+          "description": "Unique registration serial code (e.g. TPL-S2-001)"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Registration timestamp"
+        }
+      },
+      "required": ["name", "position", "approvalStatus", "auctionStatus", "basePrice"]
+    },
+    "AuctionState": {
+      "title": "AuctionState",
+      "description": "Real-time state of the active live bidding auction room",
+      "type": "object",
+      "properties": {
+        "seasonId": {
+          "type": "string",
+          "description": "Active tournament season ID"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["idle", "active", "paused", "sold", "unsold"],
+          "description": "Room auction status"
+        },
+        "currentPlayerId": {
+          "type": "string",
+          "description": "ID of player currently on the auction block"
+        },
+        "currentPlayerName": {
+          "type": "string",
+          "description": "Name of player under the hammer"
+        },
+        "currentPlayerPosition": {
+          "type": "string",
+          "description": "Position of current player"
+        },
+        "currentPlayerAge": {
+          "type": "number",
+          "description": "Age of current player"
+        },
+        "currentPlayerPhoto": {
+          "type": "string",
+          "description": "Photo of current player"
+        },
+        "currentBasePrice": {
+          "type": "number",
+          "description": "Base price for current player"
+        },
+        "currentBid": {
+          "type": "number",
+          "description": "Highest accepted bid amount in BDT"
+        },
+        "highestBidderTeamId": {
+          "type": "string",
+          "description": "ID of team currently leading the bid"
+        },
+        "highestBidderTeamName": {
+          "type": "string",
+          "description": "Name of team currently leading the bid"
+        },
+        "minIncrement": {
+          "type": "number",
+          "description": "Minimum bid step amount in BDT"
+        },
+        "timerSeconds": {
+          "type": "number",
+          "description": "Standard duration countdown in seconds"
+        },
+        "timerExpiresAt": {
+          "type": "number",
+          "description": "Unix epoch millisecond timestamp when timer expires"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["status", "currentBid", "minIncrement"]
+    },
+    "Bid": {
+      "title": "Bid",
+      "description": "Individual bid logged in auction history",
+      "type": "object",
+      "properties": {
+        "seasonId": {
+          "type": "string",
+          "description": "Tournament season ID"
+        },
+        "playerId": {
+          "type": "string",
+          "description": "Player being bid on"
+        },
+        "teamId": {
+          "type": "string",
+          "description": "Bidding team ID"
+        },
+        "teamName": {
+          "type": "string",
+          "description": "Bidding team name"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Bid amount in BDT"
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Timestamp of bid"
+        }
+      },
+      "required": ["playerId", "teamId", "teamName", "amount", "timestamp"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Tamper-evident audit trail of auction and administrative events",
+      "type": "object",
+      "properties": {
+        "seasonId": {
+          "type": "string",
+          "description": "Tournament season ID"
+        },
+        "action": {
+          "type": "string",
+          "description": "Action type"
+        },
+        "actorId": {
+          "type": "string",
+          "description": "User or system ID"
+        },
+        "actorEmail": {
+          "type": "string",
+          "description": "Actor email address"
+        },
+        "actorRole": {
+          "type": "string",
+          "description": "Actor role"
+        },
+        "details": {
+          "type": "string",
+          "description": "Human readable event log in Bangla/English"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "ISO timestamp"
+        }
+      },
+      "required": ["action", "details", "timestamp"]
+    },
+    "LeagueSettings": {
+      "title": "LeagueSettings",
+      "description": "Global tournament and auction parameters",
+      "type": "object",
+      "properties": {
+        "leagueName": {
+          "type": "string",
+          "description": "Tournament title"
+        },
+        "currentSeasonId": {
+          "type": "string",
+          "description": "Active season identifier"
+        },
+        "season": {
+          "type": "string",
+          "description": "Season indicator label"
+        },
+        "defaultBudget": {
+          "type": "number",
+          "description": "Default budget per team in BDT"
+        },
+        "defaultBasePrice": {
+          "type": "number",
+          "description": "Default player base price in BDT"
+        },
+        "defaultMinIncrement": {
+          "type": "number",
+          "description": "Default minimum bid step in BDT"
+        },
+        "defaultTimerSeconds": {
+          "type": "number",
+          "description": "Countdown duration in seconds"
+        },
+        "maxSquadSize": {
+          "type": "number",
+          "description": "Squad size limit"
+        },
+        "regFeeAmount": {
+          "type": "number",
+          "description": "Standard player registration fee in BDT"
+        },
+        "bKashNumber": {
+          "type": "string",
+          "description": "bKash merchant/personal number"
+        },
+        "nagadNumber": {
+          "type": "string",
+          "description": "Nagad number"
+        },
+        "rocketNumber": {
+          "type": "string",
+          "description": "Rocket number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated timestamp"
+        }
+      },
+      "required": ["leagueName", "season"]
+    },
+    "RegistrationSettings": {
+      "title": "RegistrationSettings",
+      "description": "Form numbering counter and configuration for player registration forms",
+      "type": "object",
+      "properties": {
+        "startFormNumber": {
+          "type": "number",
+          "description": "Initial form number sequence base, defaults to 1"
+        },
+        "nextFormNumber": {
+          "type": "number",
+          "description": "Authoritative next sequential form number"
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix label for form number (e.g. ফরম নং:- )"
+        },
+        "labelBn": {
+          "type": "string",
+          "description": "Bangla display label"
+        },
+        "labelEn": {
+          "type": "string",
+          "description": "English display label"
+        },
+        "digitFormat": {
+          "type": "string",
+          "enum": ["bn", "en"],
+          "description": "Digit style (Bengali digits ১, ২ or English digits 1, 2)"
+        },
+        "totalRegistrations": {
+          "type": "number",
+          "description": "Total count of processed player registrations"
+        },
+        "lastAssignedNumber": {
+          "type": "number",
+          "description": "Most recently assigned form integer number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp of last modification"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "Admin email or system process that executed the update"
+        }
+      },
+      "required": ["startFormNumber", "nextFormNumber"]
+    }
+  },
+  "firestore": {
+    "/seasons/{seasonId}": {
+      "schema": { "$ref": "#/entities/Season" },
+      "description": "Tournament seasons (Season 2, Season 3, etc.)"
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Platform administrators list"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profiles and team linkage"
+    },
+    "/teams/{teamId}": {
+      "schema": { "$ref": "#/entities/Team" },
+      "description": "Registered tournament teams, budgets, and squads per season"
+    },
+    "/players/{playerId}": {
+      "schema": { "$ref": "#/entities/Player" },
+      "description": "Player registry, status, bidding outcomes and payment records per season"
+    },
+    "/auction/{auctionId}": {
+      "schema": { "$ref": "#/entities/AuctionState" },
+      "description": "Live auction block state and timer"
+    },
+    "/auction/{auctionId}/bids/{bidId}": {
+      "schema": { "$ref": "#/entities/Bid" },
+      "description": "Real-time bids history for active player"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "System audit trail records"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/LeagueSettings" },
+      "description": "Tournament auction configurations"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Teesta Premier League Season 2 (TPL S2)",
+  "description": "Official football player auction, live bidding room, team management, and registration portal for Teesta Premier League Season 2.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

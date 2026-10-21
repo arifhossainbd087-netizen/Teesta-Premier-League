@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Hind Siliguri', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background-color: #0b1320;
+    color: #f1f5f9;
+    min-height: 100vh;
+  }
+}
+
+/* Custom scrollbar for bidding ticker and player tables */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(59, 130, 246, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(59, 130, 246, 0.6);
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(34, 197, 94, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(34, 197, 94, 0.8);
+  }
+}
+
+.glow-active-bid {
+  animation: pulseGlow 1.5s infinite;
+}

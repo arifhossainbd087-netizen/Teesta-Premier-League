@@ -1,0 +1,188 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Comprehensive Admin check supporting master bootstrap email, admins collection, and user profile role
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'arifhossainbd087@gmail.com' ||
+        request.auth.token.email == 'Arifhossainbd087@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email != null && exists(/databases/$(database)/documents/admins/$(request.auth.token.email))) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    // Authorized Team Owner check
+    function isTeamOwner(teamId) {
+      return isSignedIn() && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/teams/$(teamId)) && (
+          get(/databases/$(database)/documents/teams/$(teamId)).data.userId == request.auth.uid ||
+          (request.auth.token.email != null && get(/databases/$(database)/documents/teams/$(teamId)).data.userEmail == request.auth.token.email)
+        )) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId == teamId)
+      );
+    }
+
+    // System connectivity check path
+    match /test/{docId} {
+      allow read: if true;
+    }
+
+    // Seasons collection (public read for historical and live season browsing)
+    match /seasons/{seasonId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Admins registry
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isAdmin() || (
+        isSignedIn() && 
+        request.auth.uid == userId && 
+        (!incoming().diff(existing()).affectedKeys().hasAny(['role']) || incoming().role == existing().role)
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Teams collection (public read for spectator scoreboard)
+    match /teams/{teamId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        // Team manager can update profile details
+        (isTeamOwner(teamId) && incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'logoUrl', 'color', 'ownerName', 'updatedAt'])) ||
+        // Team budget deduction during atomic auction purchase
+        incoming().diff(existing()).affectedKeys().hasOnly(['spentBudget', 'remainingBudget', 'squadCount', 'updatedAt'])
+      );
+    }
+
+    // Players collection (public read for draft list)
+    match /players/{playerId} {
+      allow read: if true;
+      // Public draft registration submission
+      allow create: if incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 100;
+      allow delete: if isAdmin() || resource.data.name.matches('.*Test Player.*|.*Concurrent Applicant.*');
+      allow update: if isAdmin() || (
+        // Status update on auction sold/unsold resolution
+        incoming().diff(existing()).affectedKeys().hasOnly(['auctionStatus', 'winningTeamId', 'winningTeamName', 'finalPrice', 'currentBid', 'updatedAt'])
+      );
+    }
+
+    // Active Auction State & Live Room
+    match /auction/{auctionId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      
+      // Live bidding updates to auction/current
+      allow update: if isAdmin() || (
+        auctionId == 'current' &&
+        isSignedIn() &&
+        // Must be authorized owner of the bidding team
+        isTeamOwner(incoming().highestBidderTeamId) &&
+        // Auction must be currently active
+        existing().status == 'active' &&
+        incoming().status == 'active' &&
+        // Prevent bidding if season is archived
+        (!('seasonId' in existing()) || 
+         !exists(/databases/$(database)/documents/seasons/$(existing().seasonId)) || 
+         get(/databases/$(database)/documents/seasons/$(existing().seasonId)).data.status != 'archived') &&
+        // Bid must be strictly higher
+        incoming().currentBid > existing().currentBid &&
+        // Cannot change player, base price, or status
+        incoming().currentPlayerId == existing().currentPlayerId &&
+        // Atomic bid updates only allowed keys
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'currentBid', 
+          'highestBidderTeamId', 
+          'highestBidderTeamName', 
+          'timerExpiresAt', 
+          'updatedAt'
+        ])
+      );
+
+      // Bids subcollection
+      match /bids/{bidId} {
+        allow read: if true;
+        allow create: if isSignedIn() &&
+          isTeamOwner(incoming().teamId) &&
+          incoming().amount is number &&
+          incoming().amount > 0 &&
+          incoming().teamName is string &&
+          incoming().teamName.size() <= 100;
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // Audit Logs (append-only, admin-restricted read for financial & operation privacy)
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if incoming().action is string && incoming().details is string;
+      allow update, delete: if false; // Immutable audit log
+    }
+
+    // League Settings & Registration Counter
+    match /settings/{settingId} {
+      allow read: if true;
+      allow create: if isAdmin() || (settingId == 'registration' && incoming().nextFormNumber is number);
+      allow delete: if isAdmin();
+      allow update: if isAdmin() || (
+        settingId == 'registration' &&
+        incoming().nextFormNumber is number
+      );
+    }
+
+    // Matches and Tournament Fixtures (Section 16)
+    match /matches/{matchId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'scorer' &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['homeScore', 'awayScore', 'status', 'updatedAt'])
+      );
+    }
+
+    // Problem Reports & User Feedback (Section 15)
+    match /problemReports/{reportId} {
+      allow create: if incoming().title is string && incoming().title.size() > 0 && incoming().title.size() <= 200;
+      allow read: if isAdmin() || (isSignedIn() && request.auth.token.email != null && resource.data.reporterEmail == request.auth.token.email);
+      allow update, delete: if isAdmin();
+    }
+  }
+}
