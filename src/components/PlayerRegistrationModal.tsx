@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { X, UserPlus, CheckCircle2, ShieldAlert, CreditCard, Sparkles, FileText, Phone, MapPin, Settings } from 'lucide-react';
 import { PlayerPosition, PlayerCategory, PaymentMethod, RegistrationSettings } from '../types';
-import { doc, collection, getDocs, query, where, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase/config';
+import { doc, collection, getDocs, getDocsFromCache, query, where, onSnapshot } from 'firebase/firestore';
+import { db, isQuotaExceededError, formatFriendlyErrorMessage } from '../firebase/config';
 import { formatBDT } from '../utils/formatters';
 import { PlayerPhotoUploader } from './PlayerPhotoUploader';
 import { useAuth } from '../context/AuthContext';
@@ -34,7 +34,9 @@ export const PlayerRegistrationModal: React.FC<PlayerRegistrationModalProps> = (
   seasonFee = 500,
   seasonName,
 }) => {
-  const { isAdmin, currentUser } = useAuth();
+  const { isAdmin, isSuperAdmin, currentUser } = useAuth();
+  const isSuperAdminEmail =
+    isSuperAdmin || (currentUser?.email || '').trim().toLowerCase() === 'arifhossainbd087@gmail.com';
   const [name, setName] = useState('');
   const [age, setAge] = useState<number>(20);
   const [position, setPosition] = useState<PlayerPosition>('Forward');
@@ -59,21 +61,44 @@ export const PlayerRegistrationModal: React.FC<PlayerRegistrationModalProps> = (
   } | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Subscribe to authoritative registration settings & sequential counter
+  // Subscribe to authoritative registration settings only when modal is open
   useEffect(() => {
+    // Read local cache first for instant form number display
+    try {
+      const cached = localStorage.getItem('tpl_cached_settings');
+      if (cached) {
+        setRegSettings({ ...DEFAULT_REGISTRATION_SETTINGS, ...JSON.parse(cached) });
+      }
+    } catch {}
+
+    if (!isOpen) return;
+
     const unsub = onSnapshot(
       doc(db, 'settings', 'registration'),
       snap => {
         if (snap.exists()) {
-          setRegSettings({ ...DEFAULT_REGISTRATION_SETTINGS, ...(snap.data() as RegistrationSettings) });
+          const data = { ...DEFAULT_REGISTRATION_SETTINGS, ...(snap.data() as RegistrationSettings) };
+          setRegSettings(data);
+          try {
+            localStorage.setItem('tpl_cached_settings', JSON.stringify(data));
+          } catch {}
         }
       },
       err => {
-        console.warn('Registration settings listener notice:', err);
+        if (isQuotaExceededError(err)) {
+          const cached = localStorage.getItem('tpl_cached_settings');
+          if (cached) {
+            try {
+              setRegSettings({ ...DEFAULT_REGISTRATION_SETTINGS, ...JSON.parse(cached) });
+            } catch {}
+          }
+        } else {
+          console.warn('Registration settings listener notice:', err);
+        }
       }
     );
     return () => unsub();
-  }, []);
+  }, [isOpen]);
 
   const currentDisplayFormNumber = formatFormDisplay(
     regSettings.nextFormNumber || 1,
@@ -113,14 +138,43 @@ export const PlayerRegistrationModal: React.FC<PlayerRegistrationModalProps> = (
     setErrorMessage(null);
 
     try {
-      // Duplicate registration check by phone number within the season
-      const dupQuery = query(
-        collection(db, 'players'),
-        where('phone', '==', cleanPhone),
-        where('seasonId', '==', currentSeasonId)
-      );
-      const dupSnap = await getDocs(dupQuery);
-      if (!dupSnap.empty) {
+      // Duplicate registration check by phone number within the season (with cache and quota resilience)
+      let isDuplicate = false;
+      try {
+        const dupQuery = query(
+          collection(db, 'players'),
+          where('phone', '==', cleanPhone),
+          where('seasonId', '==', currentSeasonId)
+        );
+        let dupSnap;
+        try {
+          dupSnap = await getDocs(dupQuery);
+        } catch (fetchErr) {
+          if (isQuotaExceededError(fetchErr)) {
+            try {
+              dupSnap = await getDocsFromCache(dupQuery);
+            } catch {}
+          } else {
+            throw fetchErr;
+          }
+        }
+        if (dupSnap && !dupSnap.empty) {
+          isDuplicate = true;
+        }
+      } catch {
+        // Fallback to checking local storage cached players
+        try {
+          const cachedPlayersStr = localStorage.getItem('tpl_cached_players');
+          if (cachedPlayersStr) {
+            const cachedList: any[] = JSON.parse(cachedPlayersStr);
+            if (cachedList.some(p => p.phone === cleanPhone && (!currentSeasonId || p.seasonId === currentSeasonId))) {
+              isDuplicate = true;
+            }
+          }
+        } catch {}
+      }
+
+      if (isDuplicate) {
         setIsSubmitting(false);
         setErrorMessage(
           language === 'bn'
@@ -156,7 +210,7 @@ export const PlayerRegistrationModal: React.FC<PlayerRegistrationModalProps> = (
         photoUrl: photoUrl.trim() || '',
       };
 
-      // Atomic, Concurrency-Safe Sequential Form Numbering via Firestore Transaction
+      // Atomic, Concurrency-Safe Sequential Form Numbering via Firestore Transaction (with quota direct write fallback)
       const regResult = await registerPlayerWithAtomicFormNumber(playerPayload, currentSeasonId);
 
       if (!regResult.success || !regResult.player) {
@@ -180,13 +234,15 @@ export const PlayerRegistrationModal: React.FC<PlayerRegistrationModalProps> = (
       setSubmitted(true);
       onSuccess();
     } catch (err: any) {
-      console.error('Registration error:', err);
+      console.warn('Registration exception caught:', err);
       setIsSubmitting(false);
       setErrorMessage(
-        err?.message ||
-          (language === 'bn'
+        formatFriendlyErrorMessage(
+          err,
+          language === 'bn'
             ? 'নিবন্ধন সম্পন্ন করতে ব্যর্থ হয়েছে। অনুগ্রহ করে ইন্টারনেট কানেকশন যাচাই করে পুনরায় চেষ্টা করুন।'
-            : 'Registration failed. Please check network connection and try again.')
+            : 'Registration failed. Please check network connection and try again.'
+        )
       );
     }
   };
@@ -219,7 +275,7 @@ export const PlayerRegistrationModal: React.FC<PlayerRegistrationModalProps> = (
                   {currentDisplayFormNumber}
                 </span>
                 <span className="text-[10px] text-emerald-400 font-semibold">{seasonName || 'TPL S2'}</span>
-                {isAdmin && (
+                {isSuperAdminEmail && (
                   <button
                     type="button"
                     onClick={() => setIsSettingsModalOpen(true)}
@@ -541,13 +597,14 @@ export const PlayerRegistrationModal: React.FC<PlayerRegistrationModalProps> = (
         )}
       </div>
 
-      {/* Admin Registration Settings Modal */}
-      {isAdmin && (
+      {/* Super Admin Registration Settings Modal */}
+      {isSuperAdminEmail && (
         <RegistrationSettingsModal
           isOpen={isSettingsModalOpen}
           onClose={() => setIsSettingsModalOpen(false)}
           language={language}
-          currentUserEmail={currentUser?.email || 'admin'}
+          currentUserEmail={currentUser?.email || ''}
+          currentSeasonId={currentSeasonId}
           onSettingsSaved={newSettings => setRegSettings(newSettings)}
         />
       )}

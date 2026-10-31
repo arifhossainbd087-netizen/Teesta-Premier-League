@@ -140,6 +140,24 @@ export async function updateTeamField(
     return;
   }
 
+  if (field === 'userEmail' || field === 'loginEmail') {
+    const emailNorm = String(value || '').trim().toLowerCase();
+    if (emailNorm && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+      throw new Error('অনুগ্রহ করে সঠিক ইমেইল অ্যাড্রেস লিখুন (Invalid email format).');
+    }
+    await updateDoc(teamRef, {
+      userEmail: emailNorm,
+      loginEmail: emailNorm,
+      updatedAt: new Date().toISOString(),
+    });
+    await recordEditAudit(
+      'TEAM_MANAGER_EMAIL_UPDATED',
+      `দলের [${currentTeam?.name || teamId}] ম্যানেজার লগইন ইমেইল হালনাগাদ: "${emailNorm || 'অপসারণ'}"`,
+      actorEmail
+    );
+    return;
+  }
+
   let sanitizedValue = value;
   if (field === 'maxSquad') {
     const num = Number(value);
@@ -238,9 +256,9 @@ export async function updateAuctionSetting(
   seasonId?: string,
   actorEmail: string = 'admin'
 ): Promise<void> {
-  const num = Number(value);
-  if (isNaN(num) || num <= 0) {
-    throw new Error('মানটি অবশ্যই ধনাত্মক সংখ্যা হতে হবে (Must be greater than 0).');
+  const num = Math.floor(Number(value));
+  if (isNaN(num) || (field === 'timerSeconds' ? num <= 0 : num < 0)) {
+    throw new Error('মানটি অবশ্যই অঋণাত্মক সংখ্যা হতে হবে (Must be 0 or greater).');
   }
 
   const auctionRef = doc(db, 'auction', 'current');

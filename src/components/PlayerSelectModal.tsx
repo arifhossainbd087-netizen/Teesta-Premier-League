@@ -3,6 +3,7 @@ import { X, Gavel, User, Search, Play, Clock, TrendingUp } from 'lucide-react';
 import { Player } from '../types';
 import { formatBDT, getPositionBadgeColor, getPositionLabel } from '../utils/formatters';
 import { loadPlayerToAuction } from '../services/auctionService';
+import { parseNumericFormValue } from '../services/registrationService';
 import { useAuth } from '../context/AuthContext';
 
 interface PlayerSelectModalProps {
@@ -10,6 +11,8 @@ interface PlayerSelectModalProps {
   onClose: () => void;
   players: Player[];
   language: 'bn' | 'en';
+  savedTimerSeconds?: number;
+  savedMinIncrement?: number;
 }
 
 export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
@@ -17,15 +20,32 @@ export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
   onClose,
   players,
   language,
+  savedTimerSeconds = 20,
+  savedMinIncrement = 100,
 }) => {
   const { currentUser } = useAuth();
 
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [basePrice, setBasePrice] = useState<number>(2500);
-  const [timerSeconds, setTimerSeconds] = useState<number>(20);
-  const [minIncrement, setMinIncrement] = useState<number>(1000);
+  const [timerSeconds, setTimerSeconds] = useState<number>(savedTimerSeconds || 20);
+  const [minIncrement, setMinIncrement] = useState<number>(
+    typeof savedMinIncrement === 'number' && savedMinIncrement >= 0 ? savedMinIncrement : 100
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  // Sync with saved timer seconds and min increment when modal opens or settings change
+  React.useEffect(() => {
+    if (savedTimerSeconds && savedTimerSeconds > 0) {
+      setTimerSeconds(savedTimerSeconds);
+    }
+  }, [savedTimerSeconds, isOpen]);
+
+  React.useEffect(() => {
+    if (typeof savedMinIncrement === 'number' && savedMinIncrement >= 0) {
+      setMinIncrement(savedMinIncrement);
+    }
+  }, [savedMinIncrement, isOpen]);
 
   if (!isOpen) return null;
 
@@ -44,11 +64,24 @@ export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
       );
     }
     return true;
+  }).sort((a, b) => {
+    const numA =
+      typeof a.formNumericValue === 'number' && a.formNumericValue > 0
+        ? a.formNumericValue
+        : parseNumericFormValue(a.formNumber);
+    const numB =
+      typeof b.formNumericValue === 'number' && b.formNumericValue > 0
+        ? b.formNumericValue
+        : parseNumericFormValue(b.formNumber);
+    if (numA > 0 && numB > 0) return numA - numB;
+    if (numA > 0) return -1;
+    if (numB > 0) return 1;
+    return (a.createdAt || '').localeCompare(b.createdAt || '');
   });
 
   const handlePlayerChoose = (player: Player) => {
     setSelectedPlayer(player);
-    setBasePrice(player.basePrice || 2500);
+    setBasePrice(player.basePrice !== undefined && player.basePrice !== null ? player.basePrice : 2500);
   };
 
   const handleStartAuction = async () => {
@@ -66,7 +99,10 @@ export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
       await loadPlayerToAuction(
         {
           ...selectedPlayer,
-          basePrice,
+          basePrice:
+            typeof basePrice === 'string'
+              ? ((basePrice as string).trim() === '' ? 0 : Math.max(0, parseInt(basePrice, 10) || 0))
+              : Math.max(0, Number(basePrice) || 0),
         },
         timerSeconds,
         minIncrement,
@@ -157,8 +193,13 @@ export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
                         )}
                       </div>
                       <div>
-                        <div className="font-bold flex items-center gap-1.5">
+                        <div className="font-bold flex items-center gap-1.5 flex-wrap">
                           <span>{p.name}</span>
+                          {p.formNumber && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-medium">
+                              {p.formNumber}
+                            </span>
+                          )}
                           {p.auctionStatus === 'unsold' && (
                             <span className="text-[9px] bg-rose-500/20 text-rose-300 px-1 py-0.2 rounded">
                               R2
@@ -172,6 +213,9 @@ export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
                             )}`}
                           >
                             {getPositionLabel(p.position, language === 'bn')}
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded border border-red-500/60 bg-red-950/60 text-red-300 font-bold text-[9px]">
+                            {p.category ? `ক্যাটেগরি ${p.category}` : 'ক্যাটেগরি A'}
                           </span>
                           <span>•</span>
                           <span>{p.area}</span>
@@ -220,9 +264,12 @@ export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
                   </label>
                   <input
                     type="number"
-                    step={500}
-                    value={basePrice}
-                    onChange={e => setBasePrice(parseInt(e.target.value, 10) || 0)}
+                    min={0}
+                    value={basePrice !== undefined && basePrice !== null ? basePrice : ''}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setBasePrice(val === '' ? ('' as any) : Math.max(0, parseInt(val, 10) || 0));
+                    }}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono"
                   />
                 </div>
@@ -234,28 +281,37 @@ export const PlayerSelectModal: React.FC<PlayerSelectModalProps> = ({
                   <select
                     value={timerSeconds}
                     onChange={e => setTimerSeconds(parseInt(e.target.value, 10) || 20)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white cursor-pointer"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white cursor-pointer font-mono"
                   >
-                    <option value={15}>১৫ সেকেন্ড (Fast)</option>
-                    <option value={20}>২০ সেকেন্ড (Standard)</option>
-                    <option value={30}>৩০ সেকেন্ড (Extended)</option>
+                    <option value={15}>১৫ সেকেন্ড (15s)</option>
+                    <option value={20}>২০ সেকেন্ড (20s - Standard)</option>
+                    <option value={30}>৩০ সেকেন্ড (30s)</option>
+                    <option value={60}>৬০ সেকেন্ড (60s)</option>
+                    {![15, 20, 30, 60].includes(timerSeconds) && (
+                      <option value={timerSeconds}>{timerSeconds} সেকেন্ড (সংরক্ষিত কাস্টম)</option>
+                    )}
                   </select>
                 </div>
 
                 <div>
                   <label className="text-slate-400 block mb-1">
-                    {language === 'bn' ? 'ন্যূনতম ডাক বৃদ্ধি' : 'Min Increment'}
+                    {language === 'bn' ? 'ন্যূনতম ডাক বৃদ্ধি (৳)' : 'Min Increment (BDT)'}
                   </label>
-                  <select
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
                     value={minIncrement}
-                    onChange={e => setMinIncrement(parseInt(e.target.value, 10) || 1000)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white cursor-pointer"
-                  >
-                    <option value={500}>+৳ ৫০০</option>
-                    <option value={1000}>+৳ ১,০০০</option>
-                    <option value={2000}>+৳ ২,০০০</option>
-                    <option value={5000}>+৳ ৫,০০০</option>
-                  </select>
+                    onChange={e => {
+                      const val = parseInt(e.target.value, 10);
+                      setMinIncrement(isNaN(val) ? 0 : Math.max(0, val));
+                    }}
+                    placeholder="যেমন: 20, 50, 100, 150, 500, 1000"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono text-xs focus:outline-none focus:border-purple-500"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">
+                    {language === 'bn' ? '০ বা যেকোনো ধনাত্মক পূর্ণসংখ্যা লিখতে পারেন' : 'Enter 0 or any positive whole number'}
+                  </span>
                 </div>
               </div>
             ) : (

@@ -26,8 +26,41 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, languag
       await loginWithGoogle();
       onClose();
     } catch (err: unknown) {
+      const authErr = err as { code?: string; message?: string };
+      const code = authErr?.code || '';
+      const msg = authErr?.message || '';
+
+      if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request' ||
+        msg.includes('popup-closed-by-user')
+      ) {
+        // User dismissed the popup: keep modal open without showing a red error
+        setAuthError(null);
+        return;
+      }
+
+      if (
+        code === 'auth/network-request-failed' ||
+        code === 'auth/popup-blocked' ||
+        code === 'auth/unauthorized-domain' ||
+        msg.includes('network-request-failed') ||
+        msg.includes('popup-blocked')
+      ) {
+        setAuthError(
+          language === 'bn'
+            ? 'ব্রাউজার বা প্রিভিউ স্যান্ডবক্সে গুগল পপ-আপ রিকোয়েস্ট বাধাগ্রস্ত হয়েছে। অনুগ্রহ করে নিচের ইমেইল ও পাসওয়ার্ড দিয়ে সরাসরি লগইন করুন।'
+            : 'Google popup or origin verification was blocked in this preview sandbox. Please sign in using the Email & Password form below.'
+        );
+        return;
+      }
+
       setAuthError(
-        err instanceof Error ? err.message : 'গুগল লগইন সম্পন্ন করতে সমস্যা হয়েছে'
+        err instanceof Error
+          ? err.message
+          : language === 'bn'
+          ? 'গুগল লগইন সম্পন্ন করতে সমস্যা হয়েছে'
+          : 'Google sign in failed'
       );
     } finally {
       setIsLoading(false);
@@ -48,9 +81,49 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, languag
       }
       onClose();
     } catch (err: unknown) {
-      setAuthError(
-        err instanceof Error ? err.message : 'লগইন ব্যর্থ হয়েছে। পাসওয়ার্ড বা ইমেইল সঠিক নয়।'
-      );
+      const authErr = err as { code?: string; message?: string };
+      const code = authErr?.code || '';
+      const msg = authErr?.message || '';
+
+      let friendlyMsg =
+        language === 'bn'
+          ? 'লগইন ব্যর্থ হয়েছে। পাসওয়ার্ড বা ইমেইল সঠিক নয়।'
+          : 'Authentication failed. Please check your credentials.';
+
+      if (
+        code === 'auth/user-not-found' ||
+        code === 'auth/wrong-password' ||
+        code === 'auth/invalid-credential'
+      ) {
+        friendlyMsg =
+          language === 'bn'
+            ? 'ইমেইল বা পাসওয়ার্ড ভুল হয়েছে। সঠিক তথ্য প্রদান করুন।'
+            : 'Invalid email or password.';
+      } else if (code === 'auth/email-already-in-use') {
+        friendlyMsg =
+          language === 'bn'
+            ? 'এই ইমেইল দিয়ে আগেই অ্যাকাউন্ট তৈরি করা হয়েছে। অনুগ্রহ করে লগইন করুন।'
+            : 'This email is already registered. Please log in.';
+      } else if (code === 'auth/weak-password') {
+        friendlyMsg =
+          language === 'bn'
+            ? 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।'
+            : 'Password should be at least 6 characters.';
+      } else if (code === 'auth/invalid-email') {
+        friendlyMsg =
+          language === 'bn'
+            ? 'সঠিক ইমেইল ঠিকানা প্রদান করুন।'
+            : 'Please enter a valid email address.';
+      } else if (code === 'auth/too-many-requests') {
+        friendlyMsg =
+          language === 'bn'
+            ? 'অতিরিক্ত ব্যর্থ চেষ্টার কারণে সাময়িক স্থগিত। কিছুক্ষণ পর আবার চেষ্টা করুন।'
+            : 'Too many attempts. Please try again later.';
+      } else if (msg && /[\u0980-\u09FF]/.test(msg)) {
+        friendlyMsg = msg;
+      }
+
+      setAuthError(friendlyMsg);
     } finally {
       setIsLoading(false);
     }

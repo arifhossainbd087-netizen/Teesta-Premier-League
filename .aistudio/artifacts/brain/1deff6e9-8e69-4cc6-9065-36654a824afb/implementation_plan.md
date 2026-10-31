@@ -12,10 +12,10 @@
                     ┌─────────────────────────┴─────────────────────────┐
                     ▼                                                   ▼
        [ Page Selector Dropdown ]                           [ Section Manager Panel ]
-       • Live Auction Room                                  • Reorder Sections (Up/Down)
+       • Live Auction Room (Redesigned Stadium Display)     • Reorder Sections (Up/Down)
        • Players & Draft Pool                               • Show / Hide Toggles
        • Teams & Budget Tracker                             • Add Reusable Sections
-       • Registration Form No. 13                           • Mobile vs Desktop Tweaks
+       • Registration Form No. 13 (Form No. 1 Start)        • Mobile vs Desktop Tweaks
        • Rules & League Info                                        │
        • Matches & Points Table                                     ▼
        • Admin Dashboard & Notice                      [ Visual Attribute Controls ]
@@ -23,13 +23,47 @@
                     ▼                                  • Button Text (e.g. 'শেষ ডাক!')
        [ Dynamic Live Preview Canvas ]                 • Colors, Accents, Card Styles
        • Side-by-side or Floating Drawer               • Typography, Font Size, Spacing
-       • Live toggle (Desktop / Mobile view)                        │
+       • Live toggle (Desktop / Mobile view)           • Photo Placement & Size
+       • Stadium Projector / Fullscreen Mode                        │
                     │                                               ▼
                     └──────────────────────────────────► [ Version & Publish Bar ]
-                                                         • Save Draft (to Firestore)
+                                                         • Save Draft (to Firestore / Local)
                                                          • Discard / Restore Revisions
-                                                         • Publish Live to Users
+                                                         • Publish Live to Users (`settings/auctionDisplay`)
 ```
+
+---
+
+## Completed: TPL Season 2 Live Auction Display Redesign & Admin Customizer
+- **Stadium-Grade Reference Display**:
+  - Prominent Player Portrait Card on the left with high-resolution photo, form number badge (e.g. "ফরম নং ১"), category badge, and registration ID.
+  - Large-format typography for Current Highest Bid (`formatBDT(currentBid)`) engineered for distance legibility on large screens/projectors (customizable from Large up to Monumental 8xl).
+  - Prominent Leading Team card displaying team logo/crest, team name, and remaining budget (`formatBDT(remainingBudget)`).
+  - Real-time countdown timer synchronized with Firestore `timerExpiresAt` with urgent pulsating "শেষ ডাক! / LAST CALL!" warning at $\le 5$ seconds.
+  - Master hammer controls ("শেষ ডাক! - বিক্রিত ও পরবর্তী খেলোয়াড়") with atomic transaction processing, budget reduction, and auto-advancement.
+  - Theater/Projector mode toggle for full-screen stadium and LED presentations without navigation clutter.
+- **Admin Customizer Panel (`AuctionDisplayCustomizerModal.tsx`)**:
+  - Photo size & placement (Left, Center, Split; Normal, Large, Extra Large, Full Height).
+  - Toggles for display fields (Form Number, Player ID, Position, Category, Age, Base Price, Min Step, Area, Previous Club).
+  - Theme presets (Dark Stadium, Midnight Navy, Emerald Glow, Onyx Gold, Deep Slate) & Accent color palette.
+  - Section visibility controls (Bids Feed, Teams Purse, Quick Bid Console, Rules Notice, Projector Watermark).
+  - Real-time live preview, Save Draft, and Publish to Firestore (`settings/auctionDisplay`).
+
+---
+
+## Completed: Admin-Controlled Form Number Editing & Sequential Control
+- **Super Admin Form Number Editing (`arifhossainbd087@gmail.com`)**:
+  - Direct edit icon beside player form number badge on each player card in `PlayerManagement.tsx`.
+  - Dedicated `FormNumberEditModal` displaying player portrait, name, current form number, and positive integer input.
+  - Also directly editable inside standard Player Edit modal for Super Admin.
+  - Strict duplicate checking within the tournament/season preventing two players from having the same number.
+  - Real-time synchronization to Firestore `players` document, `auction/current` board, and audit logging.
+- **Super Admin Manual Sequential Control & Unused Number Reuse**:
+  - Removed unwanted `maxExisting + 1` auto-overwrite in `ensureRegistrationSettingsExists()` so values configured by Super Admin (e.g. 3, 8, 41, 50) persist reliably across reloads.
+  - Registration transaction validates duplicates against active season players and assigns the exact requested candidate when available.
+  - Automatically advances to `assignedNumber + 1` sequentially.
+  - Supports reusing numbers released from player deletions without rejecting gaps.
+
 
 ---
 
@@ -195,3 +229,33 @@ To satisfy **Requirement 4 (Protect Critical Operations)**:
 
 ## 6. Resolved Runtime & Permission Fixes
 - **Audit Logs Listener Protection**: Resolved runtime Firestore permission error (`Missing or insufficient permissions` on path `auditLogs`). App.tsx now checks `isAdmin` prior to attaching `onSnapshot` query subscriptions on `auditLogs`. Unauthenticated visitors and general spectators are safeguarded from querying admin-restricted collections.
+
+---
+
+## 7. Completed: Public Auction Player Visibility Fix
+- **Root Cause Identified**:
+  - `LiveAuctionRoom.tsx` & `ProjectorAuctionBoard.tsx` formerly looked up the active player solely within `approvedPlayers` (`players.filter(p => p.seasonId === currentSeasonId && p.approvalStatus === 'approved')`).
+  - When an admin staged a player who was still pending approval or registered under an unassigned season (e.g., DEMO `TPL-S2-103`), the public spectator view failed the lookup and showed "নিলাম স্টেজে কোনো খেলোয়াড় নেই".
+  - Additionally, spectator clients were not auto-syncing their active season when the committee loaded a player belonging to a specific season ID.
+- **Resolution**:
+  - Automatically synchronize public viewer `currentSeasonId` to `auctionState.seasonId` whenever an auction player is on stage.
+  - Persisted authoritative display values `currentPlayerFormNumber` and `currentPlayerRegistrationNumber` directly on `auction/current`.
+  - Added comprehensive fallback: `approvedPlayers.find(...) || allPlayers.find(...) || fallback to auctionState fields`.
+  - Both Public View and Fullscreen Projector Board now immediately render the identical active player card as the Admin Preview.
+
+---
+
+## 8. Completed: Overall Auction Time Limit System
+- **Mandatory Per-Player Countdown Removed**:
+  - Eliminated automatic countdown expiration and forced per-player timer cutoffs.
+  - Replaced with admin-controlled **Overall Auction Timer** with persistent Firebase state (`overallDurationSeconds`, `overallTimerExpiresAt`, `overallTimerRemaining`, `overallTimerStatus`).
+- **Synchronized Shared Countdown Across Devices**:
+  - Shared server-time reference calculation ensuring all devices (Admin, Projector, Public Spectators, Team Managers) display the exact same remaining time.
+  - Admin controls: Start ("নিলাম শুরু করুন"), Pause ("বিরতি"), and Resume ("পুনরায় শুরু").
+  - Presets: ১০ মিনিট (600s), ৩০ মিনিট (1800s), ১ ঘণ্টা (3600s), and custom duration input in minutes (1–480 min).
+- **Time Expiration & Manual Committee Finalization**:
+  - When overall time expires, all bids are immediately blocked across all clients, displaying: `"⚠️ নিলামের সময় সমাপ্ত হয়েছে। আর কোনো নতুন ডাক গ্রহণ করা হবে না।"`.
+  - Automatic sold is strictly prohibited; the authorized admin executes manual final calls:
+    - `"শেষ ডাক! (বিক্রিত ঘোষণা)"` if valid bids were received.
+    - `"অবিক্রিত ঘোষণা"` (UNSOLD) if no bids were received.
+  - Committee can safely clean accidental bids (`"ক্লিন / বিড রিসেট"` or `"ক্লিন / রি-অকশন রিসেট"`) which restores team purse balances and squad counts exactly once.

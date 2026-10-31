@@ -351,7 +351,7 @@ export const SeasonManagerModal: React.FC<SeasonManagerModalProps> = ({
                             <EditableText
                               value={s.defaultBasePrice}
                               type="number"
-                              min={500}
+                              min={0}
                               onSave={async (val) => {
                                 await updateSeasonField(s.id, 'defaultBasePrice', Number(val), currentUser?.email || 'admin');
                               }}

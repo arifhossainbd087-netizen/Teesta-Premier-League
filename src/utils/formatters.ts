@@ -53,10 +53,10 @@ export function formatBDT(amount: number | undefined | null, useBanglaDigits = f
 }
 
 export function getPositionLabel(position: PlayerPosition, inBangla = true): string {
-  if (!inBangla) return position;
+  if (!inBangla) return position === 'Forward' ? 'Striker' : position;
   switch (position) {
     case 'Forward':
-      return 'ফরোয়ার্ড';
+      return 'স্ট্রাইকার';
     case 'Midfielder':
       return 'মিডফিল্ডার';
     case 'Defender':
@@ -64,6 +64,7 @@ export function getPositionLabel(position: PlayerPosition, inBangla = true): str
     case 'Goalkeeper':
       return 'গোলকিপার';
     default:
+      if (String(position).toLowerCase() === 'forward') return 'স্ট্রাইকার';
       return position;
   }
 }

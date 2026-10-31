@@ -96,6 +96,7 @@ export interface Team {
   color?: string;
   userId?: string; // Associated Firebase Auth user UID or team identifier
   userEmail?: string;
+  loginEmail?: string; // Authorized Gmail address for team manager authentication
   createdAt: string;
   updatedAt?: string;
 }
@@ -116,8 +117,15 @@ export interface AuctionState {
   highestBidderTeamId: string | null;
   highestBidderTeamName: string | null;
   minIncrement: number;
-  timerSeconds: number;
-  timerExpiresAt: number | null;
+  timerSeconds?: number;
+  timerExpiresAt?: number | null;
+  // Overall Auction Timer Fields (Requirement: shared time limit across tournament)
+  overallDurationSeconds?: number; // Configured total duration in seconds (e.g. 600, 1800, 3600)
+  overallTimerExpiresAt?: number | null; // Shared server-synced epoch timestamp when timer reaches 0
+  overallTimerRemaining?: number; // Remaining seconds when paused or before start
+  overallTimerStatus?: 'idle' | 'running' | 'paused' | 'expired'; // Overall timer status
+  currentPlayerFormNumber?: string; // Authoritative form number e.g. "ফরম নং ১০৩" or "TPL-S2-103"
+  currentPlayerRegistrationNumber?: string; // Authoritative serial registration number
   updatedAt: string;
 }
 
@@ -240,4 +248,110 @@ export interface RegistrationSettings {
   lastAssignedNumber: number | null; // Most recently assigned integer number
   updatedAt: string;
   updatedBy: string;
+}
+
+// Live Auction Display Configuration (Admin customizable)
+export interface AuctionDisplayConfig {
+  // Photo placement and dimensions
+  photoPlacement: 'left' | 'center' | 'split';
+  photoSize: 'normal' | 'large' | 'xlarge' | 'full';
+  photoBorderAccent: boolean;
+
+  // Information fields visibility
+  visibleFields: {
+    formNumber: boolean;
+    playerId: boolean;
+    position: boolean;
+    category: boolean;
+    age: boolean;
+    basePrice: boolean;
+    minIncrement: boolean;
+    area: boolean;
+    prevClub: boolean;
+  };
+
+  // Theme, Colors & Typography
+  themeMode: 'dark-stadium' | 'midnight-navy' | 'emerald-glow' | 'onyx-gold' | 'deep-slate';
+  accentColor: 'emerald' | 'amber' | 'cyan' | 'rose' | 'purple' | 'blue';
+  fontScale: 'standard' | 'large' | 'extra-large';
+  bidTypographySize: 'large' | 'huge' | 'jumbo' | 'monumental';
+
+  // Panel layout & alignment
+  layoutAlignment: 'balanced' | 'focus-photo' | 'focus-bid';
+  containerSpacing: 'compact' | 'comfortable' | 'spacious';
+
+  // Logo & Countdown Presentation
+  teamLogoPlacement: 'beside-name' | 'prominent-badge' | 'corner-crest';
+  countdownStyle: 'digital-clock' | 'pulse-pill' | 'circular-badge';
+
+  // Sections visibility
+  showBidsFeed: boolean;
+  showTeamsPurse: boolean;
+  showQuickBidButtons: boolean;
+  showRulesCard: boolean;
+  showProjectorWatermark: boolean;
+
+  // Persistence metadata
+  updatedAt?: string;
+  updatedBy?: string;
+  isPublished?: boolean;
+}
+
+// Multi-Admin Authorization Record
+export interface AdminRecord {
+  id: string; // Document ID (normalized email)
+  email: string; // Exact Gmail address
+  role: 'primary' | 'admin'; // Primary Admin vs Assistant Admin
+  status: 'active' | 'revoked'; // Authorization status
+  addedBy: string; // Email of the admin who granted access
+  addedAt: string; // ISO timestamp
+  notes?: string; // Optional description or purpose
+  displayName?: string; // Optional display name
+  updatedAt?: string;
+}
+
+// Team Lineup and Poster Configuration (Inspired by professional squad poster / Real Sociedad)
+export interface TeamLineup {
+  id?: string;
+  teamId: string;
+  seasonId?: string;
+  formation: string; // '4-3-3' | '4-4-2' | '3-4-3' | '3-5-2' | '4-2-3-1' | 'adaptive'
+  startingPlayerIds: string[];
+  benchPlayerIds: string[];
+  captainId?: string | null;
+  viceCaptainId?: string | null;
+  managerName?: string;
+  posterTitle?: string;
+  customPositions?: Record<string, PlayerPosition>;
+  customNames?: Record<string, string>;
+  customPhotos?: Record<string, string>;
+  customOrder?: string[];
+  updatedAt: string;
+  updatedBy: string;
+}
+
+// Auction Poster Entity (Automatic SOLD / UNSOLD Poster Gallery)
+export interface AuctionPoster {
+  id: string; // Document ID: e.g. `${seasonId}_${playerId}_${status}_${timestamp}`
+  playerId: string;
+  playerName: string;
+  playerBanglaName?: string;
+  playerPhoto?: string;
+  playerPosition?: string;
+  playerCategory?: string;
+  playerFormNumber?: string;
+  playerRegistrationNumber?: string;
+  seasonId: string;
+  seasonName?: string;
+  status: 'sold' | 'unsold';
+  finalPrice?: number | null;
+  winningTeamId?: string | null;
+  winningTeamName?: string | null;
+  winningTeamLogo?: string | null;
+  tournamentLogo?: string;
+  posterUrl: string; // Firebase Storage download URL or high-res Data URL fallback
+  storagePath?: string;
+  createdAt: string; // ISO timestamp
+  hidden?: boolean; // Admin hide/unhide control
+  caption?: string; // Social media ready text
 }

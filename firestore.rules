@@ -25,16 +25,30 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // Comprehensive Admin check supporting master bootstrap email, admins collection, and user profile role
-    function isAdmin() {
-      return isSignedIn() && (
+    // Permanent Primary Super Administrator check
+    function isPrimaryAdmin() {
+      return isSignedIn() && request.auth.token.email != null && (
         request.auth.token.email == 'arifhossainbd087@gmail.com' ||
-        request.auth.token.email == 'Arifhossainbd087@gmail.com' ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        (request.auth.token.email != null && exists(/databases/$(database)/documents/admins/$(request.auth.token.email))) ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+        request.auth.token.email == 'Arifhossainbd087@gmail.com'
       );
+    }
+
+    // Authorized Admin check (Primary Admin + Active Admins in /admins collection)
+    function isAuthorizedAdmin() {
+      return isSignedIn() && (
+        isPrimaryAdmin() ||
+        (request.auth.token.email != null && (
+          (exists(/databases/$(database)/documents/admins/$(request.auth.token.email)) &&
+           get(/databases/$(database)/documents/admins/$(request.auth.token.email)).data.status == 'active')
+        )) ||
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.status == 'active')
+      );
+    }
+
+    // Standard admin check for all tournament operations
+    function isAdmin() {
+      return isAuthorizedAdmin();
     }
 
     // Authorized Team Owner check
@@ -43,7 +57,11 @@ service cloud.firestore {
         isAdmin() ||
         (exists(/databases/$(database)/documents/teams/$(teamId)) && (
           get(/databases/$(database)/documents/teams/$(teamId)).data.userId == request.auth.uid ||
-          (request.auth.token.email != null && get(/databases/$(database)/documents/teams/$(teamId)).data.userEmail == request.auth.token.email)
+          (request.auth.token.email != null && (
+            get(/databases/$(database)/documents/teams/$(teamId)).data.userEmail == request.auth.token.email ||
+            ('loginEmail' in get(/databases/$(database)/documents/teams/$(teamId)).data &&
+             get(/databases/$(database)/documents/teams/$(teamId)).data.loginEmail == request.auth.token.email)
+          ))
         )) ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId == teamId)
@@ -61,22 +79,33 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Admins registry
+    // Admins registry - only Primary Admin may add, update or revoke admins
     match /admins/{adminId} {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
+      // Authorized admins can view the registry; signed-in users can check their own authorization doc
+      allow read: if isAuthorizedAdmin() || (
+        isSignedIn() && request.auth.token.email != null && 
+        (adminId == request.auth.token.email || adminId == request.auth.uid)
+      );
+      // Only Primary Admin can grant or update admin records
+      allow create, update: if isPrimaryAdmin();
+      // Only Primary Admin can delete, and Primary Admin record cannot be deleted
+      allow delete: if isPrimaryAdmin() && 
+        adminId != 'arifhossainbd087@gmail.com' && 
+        adminId != 'Arifhossainbd087@gmail.com';
     }
 
-    // User profiles
+    // User profiles - prevents self-elevation to admin
     match /users/{userId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && request.auth.uid == userId;
-      allow update: if isAdmin() || (
+      allow create: if isSignedIn() && request.auth.uid == userId && (
+        !('role' in incoming()) || incoming().role != 'admin' || isPrimaryAdmin()
+      );
+      allow update: if isPrimaryAdmin() || (
         isSignedIn() && 
         request.auth.uid == userId && 
         (!incoming().diff(existing()).affectedKeys().hasAny(['role']) || incoming().role == existing().role)
       );
-      allow delete: if isAdmin();
+      allow delete: if isPrimaryAdmin();
     }
 
     // Teams collection (public read for spectator scoreboard)

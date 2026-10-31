@@ -13,6 +13,11 @@ import {
   X,
   Award,
   User,
+  RotateCcw,
+  Camera,
+  UserPlus,
+  Search,
+  AlertCircle,
 } from 'lucide-react';
 import { Team, Player, Season } from '../types';
 import { formatBDT, getPositionBadgeColor, getPositionLabel } from '../utils/formatters';
@@ -21,6 +26,9 @@ import { doc, setDoc, updateDoc, deleteDoc, collection } from 'firebase/firestor
 import { db } from '../firebase/config';
 import { EditableText } from './common/EditableText';
 import { updateTeamField } from '../services/editService';
+import { manualAddPlayerToSquad, manualRemovePlayerFromSquad } from '../services/auctionService';
+import { TeamLogoModal } from './TeamLogoModal';
+import { TeamBudgetResetModal } from './TeamBudgetResetModal';
 
 interface TeamManagementProps {
   teams: Team[];
@@ -40,6 +48,8 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
   const [selectedTeamRoster, setSelectedTeamRoster] = useState<Team | null>(null);
   const [showAddTeamModal, setShowAddTeamModal] = useState(false);
   const [editingTeam, setEditingTeam] = useState<Team | null>(null);
+  const [budgetResetTeam, setBudgetResetTeam] = useState<Team | null>(null);
+  const [logoEditTeam, setLogoEditTeam] = useState<Team | null>(null);
 
   // New Team Form state
   const [teamName, setTeamName] = useState('');
@@ -53,13 +63,28 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
   const handleCreateTeam = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!teamName.trim()) return;
-    if (!currentUser) {
-      alert(
-        language === 'bn'
-          ? 'নতুন দল তৈরি করতে প্রথমে আপনার Google অ্যাডমিন অ্যাকাউন্ট (arifhossainbd087@gmail.com) দিয়ে লগইন করুন।'
-          : 'Please sign in with your admin account to create teams.'
-      );
+    if (!isAdmin) {
+      alert(language === 'bn' ? 'শুধুমাত্র অনুমোদিত অ্যাডমিন নতুন দল তৈরি করতে পারবেন।' : 'Only authorized admin can create teams.');
       return;
+    }
+
+    const cleanEmail = userEmail.trim().toLowerCase();
+    if (cleanEmail) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        alert(language === 'bn' ? 'অনুগ্রহ করে সঠিক ইমেইল অ্যাড্রেস লিখুন।' : 'Please enter a valid email address.');
+        return;
+      }
+      const duplicateTeam = teams.find(
+        t => (t.loginEmail?.toLowerCase() === cleanEmail || t.userEmail?.toLowerCase() === cleanEmail)
+      );
+      if (duplicateTeam) {
+        const confirmMsg = language === 'bn'
+          ? `সতর্কতা: "${duplicateTeam.name}" দলের জন্য ইতোমধ্যে এই ইমেইল (${cleanEmail}) বরাদ্দ রয়েছে। আপনি কি নিশ্চিত যে এই দলেও একই ইমেইল বরাদ্দ করতে চান?`
+          : `Warning: This email (${cleanEmail}) is already assigned to "${duplicateTeam.name}". Do you want to proceed?`;
+        if (!window.confirm(confirmMsg)) {
+          return;
+        }
+      }
     }
 
     try {
@@ -76,7 +101,8 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
         squadCount: 0,
         maxSquad: Number(maxSquad),
         color: teamColor,
-        userEmail: userEmail.trim().toLowerCase(),
+        userEmail: cleanEmail,
+        loginEmail: cleanEmail,
         createdAt: new Date().toISOString(),
       };
 
@@ -88,7 +114,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
         action: 'TEAM_CREATED',
         actorEmail: currentUser?.email || 'admin',
         actorRole: 'admin',
-        details: `নতুন দল ${teamName} তৈরি করা হয়েছে (বাজেট: ৳${totalBudget.toLocaleString()})`,
+        details: `নতুন দল ${teamName} তৈরি করা হয়েছে (বাজেট: ৳${totalBudget.toLocaleString()}, ম্যানেজার ইমেইল: ${cleanEmail || 'বরাদ্দ নেই'})`,
         timestamp: new Date().toISOString(),
       });
 
@@ -99,12 +125,36 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
       setUserEmail('');
     } catch (err) {
       console.error('Error creating team:', err);
-      alert('দল তৈরি করতে ব্যর্থ হয়েছে');
+      alert(language === 'bn' ? 'দল তৈরি করতে ব্যর্থ হয়েছে' : 'Failed to create team');
     }
   };
 
   const handleUpdateTeam = async () => {
     if (!editingTeam) return;
+    if (!isAdmin) {
+      alert(language === 'bn' ? 'শুধুমাত্র অনুমোদিত অ্যাডমিন দলের তথ্য পরিবর্তন করতে পারবেন।' : 'Only authorized admin can edit teams.');
+      return;
+    }
+
+    const cleanEmail = (editingTeam.userEmail || editingTeam.loginEmail || '').trim().toLowerCase();
+    if (cleanEmail) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        alert(language === 'bn' ? 'অনুগ্রহ করে সঠিক ইমেইল অ্যাড্রেস লিখুন।' : 'Please enter a valid email address.');
+        return;
+      }
+      const duplicateTeam = teams.find(
+        t => t.id !== editingTeam.id && (t.loginEmail?.toLowerCase() === cleanEmail || t.userEmail?.toLowerCase() === cleanEmail)
+      );
+      if (duplicateTeam) {
+        const confirmMsg = language === 'bn'
+          ? `সতর্কতা: "${duplicateTeam.name}" দলের জন্য ইতোমধ্যে এই ইমেইল (${cleanEmail}) বরাদ্দ রয়েছে। আপনি কি নিশ্চিত যে এই দলেও একই ইমেইল বরাদ্দ করতে চান?`
+          : `Warning: This email (${cleanEmail}) is already assigned to "${duplicateTeam.name}". Do you want to proceed?`;
+        if (!window.confirm(confirmMsg)) {
+          return;
+        }
+      }
+    }
+
     try {
       await updateDoc(doc(db, 'teams', editingTeam.id), {
         name: editingTeam.name,
@@ -116,12 +166,25 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
         remainingBudget: Number(editingTeam.totalBudget) - (editingTeam.spentBudget || 0),
         maxSquad: Number(editingTeam.maxSquad),
         color: editingTeam.color,
-        userEmail: editingTeam.userEmail?.toLowerCase() || '',
+        userEmail: cleanEmail,
+        loginEmail: cleanEmail,
         updatedAt: new Date().toISOString(),
       });
+
+      // Audit Log
+      const auditRef = doc(collection(db, 'auditLogs'));
+      await setDoc(auditRef, {
+        action: 'TEAM_UPDATED',
+        actorEmail: currentUser?.email || 'admin',
+        actorRole: 'admin',
+        details: `দল [${editingTeam.name}] এর তথ্য হালনাগাদ (ম্যানেজার ইমেইল: ${cleanEmail || 'বরাদ্দ নেই'})`,
+        timestamp: new Date().toISOString(),
+      });
+
       setEditingTeam(null);
     } catch (err) {
       console.error('Error updating team:', err);
+      alert(language === 'bn' ? 'দল সম্পাদনা করতে ব্যর্থ হয়েছে' : 'Failed to update team');
     }
   };
 
@@ -187,8 +250,14 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div
-                      className="w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg text-white shadow-md relative group/logo shrink-0 overflow-hidden"
+                      onClick={() => {
+                        if (isAdmin) setLogoEditTeam(team);
+                      }}
+                      className={`w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg text-white shadow-md relative group/logo shrink-0 overflow-hidden ${
+                        isAdmin ? 'cursor-pointer ring-1 ring-slate-700 hover:ring-emerald-500' : ''
+                      }`}
                       style={{ backgroundColor: team.color || '#10b981' }}
+                      title={isAdmin ? (language === 'bn' ? 'লোগো পরিবর্তন করতে ক্লিক করুন' : 'Click to change logo') : team.name}
                     >
                       {team.logoUrl ? (
                         <img
@@ -203,20 +272,8 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
                         team.name.charAt(0)
                       )}
                       {isAdmin && (
-                        <div
-                          className="absolute -bottom-1 -right-1 z-20"
-                          title={language === 'bn' ? 'লোগো URL সম্পাদনা' : 'Edit Logo URL'}
-                        >
-                          <EditableText
-                            value={team.logoUrl || ''}
-                            required={false}
-                            onSave={async (val) => {
-                              await updateTeamField(team.id, 'logoUrl', val, team, currentUser?.email || 'admin');
-                            }}
-                            label={language === 'bn' ? 'দলের লোগো URL' : 'Team Logo URL'}
-                            placeholder="https://.../logo.png"
-                            pencilClassName="p-0.5 rounded-full bg-slate-900 border border-slate-700 text-slate-300 hover:text-emerald-400"
-                          />
+                        <div className="absolute inset-0 bg-black/60 opacity-0 group-hover/logo:opacity-100 flex items-center justify-center transition-opacity">
+                          <Camera className="w-4 h-4 text-emerald-300" />
                         </div>
                       )}
                     </div>
@@ -277,15 +334,29 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
                   {isAdmin && (
                     <div className="flex items-center gap-1">
                       <button
+                        onClick={() => setLogoEditTeam(team)}
+                        className="p-1.5 rounded-lg text-emerald-400 hover:text-white hover:bg-emerald-950/60 border border-emerald-500/20 transition-colors cursor-pointer"
+                        title={language === 'bn' ? 'দলের লোগো আপলোড ও পরিবর্তন' : 'Upload Team Logo'}
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => setBudgetResetTeam(team)}
+                        className="p-1.5 rounded-lg text-amber-400 hover:text-white hover:bg-amber-950/60 border border-amber-500/20 transition-colors cursor-pointer"
+                        title={language === 'bn' ? 'বাজেট রিসেট ও সংশোধন' : 'Reset / Adjust Budget'}
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </button>
+                      <button
                         onClick={() => setEditingTeam(team)}
-                        className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
                         title={language === 'bn' ? 'সম্পূর্ণ ফর্ম সম্পাদনা' : 'Full Team Edit Form'}
                       >
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => handleDeleteTeam(team.id, team.name)}
-                        className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-slate-800 transition-colors cursor-pointer"
                         title="মুছুন"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -294,20 +365,53 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
                   )}
                 </div>
 
-                {/* Assigned Login Email */}
-                {team.userEmail && (
+                {/* Assigned Login Email or Unassigned Warning Badge */}
+                {team.loginEmail || team.userEmail ? (
                   <div className="mt-2 text-[10px] text-slate-400 bg-slate-950 px-2.5 py-1 rounded-md border border-slate-800/80 truncate flex items-center justify-between">
-                    <span>
-                      {language === 'bn' ? 'লগইন:' : 'Login:'} <strong className="text-slate-300">{team.userEmail}</strong>
+                    <span className="truncate pr-1">
+                      <span className="text-emerald-400 font-semibold mr-1">📧 {language === 'bn' ? 'লগইন:' : 'Login:'}</span>
+                      <strong className="text-slate-300 font-mono">{team.loginEmail || team.userEmail}</strong>
                     </span>
-                    <EditableText
-                      value={team.userEmail}
-                      onSave={async (val) => {
-                        await updateTeamField(team.id, 'userEmail', val, team, currentUser?.email || 'admin');
-                      }}
-                      label={language === 'bn' ? 'দলের লগইন ইমেইল' : 'Team Login Email'}
-                      pencilClassName="text-slate-500 hover:text-sky-400"
-                    />
+                    {isAdmin && (
+                      <EditableText
+                        value={team.loginEmail || team.userEmail}
+                        onSave={async (val) => {
+                          const cleanVal = String(val || '').trim().toLowerCase();
+                          if (cleanVal) {
+                            const duplicateTeam = teams.find(
+                              t => t.id !== team.id && (t.loginEmail?.toLowerCase() === cleanVal || t.userEmail?.toLowerCase() === cleanVal)
+                            );
+                            if (duplicateTeam) {
+                              const confirmMsg = language === 'bn'
+                                ? `সতর্কতা: "${duplicateTeam.name}" দলের জন্য ইতোমধ্যে এই ইমেইল (${cleanVal}) বরাদ্দ রয়েছে। আপনি কি নিশ্চিত যে এই দলেও একই ইমেইল বরাদ্দ করতে চান?`
+                                : `Warning: This email (${cleanVal}) is already assigned to "${duplicateTeam.name}". Do you want to proceed?`;
+                              if (!window.confirm(confirmMsg)) {
+                                return;
+                              }
+                            }
+                          }
+                          await updateTeamField(team.id, 'userEmail', cleanVal, team, currentUser?.email || 'admin');
+                        }}
+                        label={language === 'bn' ? 'দলের লগইন ইমেইল (Gmail)' : 'Team Login Email (Gmail)'}
+                        pencilClassName="text-slate-500 hover:text-sky-400"
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-2 text-[10px] bg-amber-500/10 border border-amber-500/30 text-amber-300 px-2.5 py-1.5 rounded-md flex items-center justify-between">
+                    <span className="font-semibold flex items-center gap-1 truncate pr-1">
+                      <span>⚠️</span>
+                      <span className="truncate">{language === 'bn' ? 'কোনো ম্যানেজার ইমেইল বরাদ্দ নেই (ডাক প্রদান নিষ্ক্রিয়)' : 'No manager email assigned (Bidding disabled)'}</span>
+                    </span>
+                    {isAdmin && (
+                      <button
+                        onClick={() => setEditingTeam(team)}
+                        className="text-amber-400 hover:text-amber-200 underline text-[10px] font-bold shrink-0 cursor-pointer"
+                        title={language === 'bn' ? 'ম্যানেজার জিমেইল বরাদ্দ করুন' : 'Assign Manager Gmail'}
+                      >
+                        {language === 'bn' ? 'বরাদ্দ করুন' : 'Assign'}
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -363,6 +467,20 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
                     ></div>
                   </div>
                 </div>
+
+                {/* Admin Budget Reset & Test Deduction Correction Button */}
+                {isAdmin && (
+                  <div className="pt-2.5">
+                    <button
+                      onClick={() => setBudgetResetTeam(team)}
+                      className="w-full py-1.5 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:border-amber-500/50 text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer group"
+                      title={language === 'bn' ? 'দলের বাজেট রিসেট অথবা টেস্ট কর্তন সংশোধন করুন' : 'Reset budget or correct test deductions'}
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-amber-400 group-hover:-rotate-45 transition-transform" />
+                      <span>{language === 'bn' ? 'বাজেট রিসেট ও টেস্ট কর্তন সংশোধন' : 'Reset / Adjust Budget'}</span>
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Card Footer: Squad Status & View Roster Modal Trigger */}
@@ -618,15 +736,20 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
 
               <div>
                 <label className="text-slate-400 block mb-1">
-                  {language === 'bn' ? 'দলের লগইন ইমেইল (ঐচ্ছিক)' : 'Assigned Team Login Email (Optional)'}
+                  {language === 'bn' ? 'দলের লগইন ইমেইল (ম্যানেজারের Gmail)' : 'Assigned Team Login Email (Manager Gmail)'}
                 </label>
                 <input
                   type="email"
-                  placeholder="team1@teestaleague.com"
+                  placeholder="manager@gmail.com"
                   value={userEmail}
                   onChange={e => setUserEmail(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white"
                 />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  {language === 'bn'
+                    ? 'ম্যানেজার এই জিমেইল দিয়ে লগইন করলে শুধুমাত্র এই দলের হয়ে লাইভ নিলামে ডাক দিতে পারবেন।'
+                    : 'Manager logging in with this Gmail will be strictly bound to bid for this team only.'}
+                </p>
               </div>
             </div>
 
@@ -681,14 +804,36 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
               </div>
 
               <div>
-                <label className="text-slate-400 block mb-1">{language === 'bn' ? 'লোগো URL' : 'Logo URL'}</label>
-                <input
-                  type="url"
-                  placeholder="https://.../logo.png"
-                  value={editingTeam.logoUrl || ''}
-                  onChange={e => setEditingTeam({ ...editingTeam, logoUrl: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white font-mono text-xs"
-                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-slate-400">{language === 'bn' ? 'দলের অফিসিয়াল লোগো' : 'Official Team Logo'}</label>
+                  <button
+                    type="button"
+                    onClick={() => setLogoEditTeam(editingTeam)}
+                    className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-semibold text-[11px] cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>{language === 'bn' ? 'ফাইল / গ্যালারি থেকে আপলোড' : 'Upload File / Photo'}</span>
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold text-sm shrink-0 overflow-hidden border border-slate-700 shadow-sm"
+                    style={{ backgroundColor: editingTeam.color || '#10b981' }}
+                  >
+                    {editingTeam.logoUrl ? (
+                      <img src={editingTeam.logoUrl} alt={editingTeam.name} className="w-full h-full object-cover" />
+                    ) : (
+                      editingTeam.name.charAt(0)
+                    )}
+                  </div>
+                  <input
+                    type="url"
+                    placeholder="https://.../logo.png"
+                    value={editingTeam.logoUrl || ''}
+                    onChange={e => setEditingTeam({ ...editingTeam, logoUrl: e.target.value })}
+                    className="flex-1 bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white font-mono text-xs"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -739,14 +884,20 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
 
               <div>
                 <label className="text-slate-400 block mb-1">
-                  {language === 'bn' ? 'লগইন ইমেইল' : 'Assigned Email'}
+                  {language === 'bn' ? 'দলের লগইন ইমেইল (ম্যানেজারের Gmail)' : 'Assigned Team Login Email (Manager Gmail)'}
                 </label>
                 <input
                   type="email"
-                  value={editingTeam.userEmail || ''}
-                  onChange={e => setEditingTeam({ ...editingTeam, userEmail: e.target.value })}
+                  placeholder="manager@gmail.com"
+                  value={editingTeam.loginEmail || editingTeam.userEmail || ''}
+                  onChange={e => setEditingTeam({ ...editingTeam, userEmail: e.target.value, loginEmail: e.target.value })}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white"
                 />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  {language === 'bn'
+                    ? 'দলের অনুমোদিত Gmail ঠিকানা। ম্যানেজার এই জিমেইল দিয়ে লগইন করলে শুধুমাত্র এই দলের হয়ে ডাক দিতে পারবেন।'
+                    : 'Authorized manager Gmail. Only this email account can submit live bids for this team.'}
+                </p>
               </div>
             </div>
 
@@ -767,6 +918,26 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({
           </div>
         </div>
       )}
+
+      {/* Team Official Logo Modal */}
+      <TeamLogoModal
+        team={logoEditTeam}
+        isOpen={Boolean(logoEditTeam)}
+        onClose={() => setLogoEditTeam(null)}
+        currentSeasonId={currentSeasonId}
+        onLogoUpdated={(teamId, newLogoUrl) => {
+          if (editingTeam && editingTeam.id === teamId) {
+            setEditingTeam({ ...editingTeam, logoUrl: newLogoUrl });
+          }
+        }}
+      />
+
+      {/* Team Budget Reset & Manual Correction Modal */}
+      <TeamBudgetResetModal
+        team={budgetResetTeam}
+        isOpen={Boolean(budgetResetTeam)}
+        onClose={() => setBudgetResetTeam(null)}
+      />
     </div>
   );
 };

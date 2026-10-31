@@ -12,8 +12,16 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { db, auth, handleFirestoreError, OperationType } from '../firebase/config';
+import {
+  db,
+  auth,
+  handleFirestoreError,
+  OperationType,
+  isQuotaExceededError,
+  formatFriendlyErrorMessage,
+} from '../firebase/config';
 import { AuctionState, Player, Team, LeagueSettings, Season } from '../types';
+import { generateAndSavePoster } from './posterService';
 
 export const DEFAULT_SEASON_2: Season = {
   id: 'season-2-2026',
@@ -98,6 +106,22 @@ export async function placeAtomicBid(
         }
       }
 
+      // 2c. Validate overall auction time limit (Requirement: overall time limit, no per-player auto-reset)
+      const now = Date.now();
+      const isOverallExpired =
+        auctionData.overallTimerStatus === 'expired' ||
+        (auctionData.overallTimerStatus === 'running' &&
+          auctionData.overallTimerExpiresAt &&
+          now >= auctionData.overallTimerExpiresAt);
+
+      if (isOverallExpired) {
+        throw new Error('নিলামের নির্ধারিত সামগ্রিক সময় সমাপ্ত হয়েছে। আর কোনো নতুন ডাক গ্রহণ করা হবে না।');
+      }
+
+      if (auctionData.overallTimerStatus === 'paused') {
+        throw new Error('নিলামের সামগ্রিক সময় বর্তমানে সাময়িক স্থগিত (Paused) রয়েছে। নতুন ডাক দিতে অ্যাডমিন কর্তৃক পুনরায় চালু করতে হবে।');
+      }
+
       // 3. Read team state
       const teamSnap = await transaction.get(teamDocRef);
       if (!teamSnap.exists()) {
@@ -105,12 +129,42 @@ export async function placeAtomicBid(
       }
       const teamData = teamSnap.data() as Team;
 
+      // 3b. Verify authenticated caller identity and team binding
+      const authenticatedUser = auth.currentUser;
+      if (!authenticatedUser || !authenticatedUser.email) {
+        throw new Error('ডাক দেওয়ার জন্য অনুগ্রহ করে আপনার দলের অনুমোদিত Gmail অ্যাকাউন্ট দিয়ে লগইন করুন (Authentication required).');
+      }
+
+      const verifiedUserEmail = (authenticatedUser.email || '').trim().toLowerCase();
+      const isSuperAdmin = verifiedUserEmail === 'arifhossainbd087@gmail.com';
+      let isAuthorizedAdminUser = isSuperAdmin;
+      if (!isAuthorizedAdminUser) {
+        const adminDocSnap = await transaction.get(doc(db, 'admins', verifiedUserEmail));
+        if (adminDocSnap.exists() && adminDocSnap.data().status === 'active') {
+          isAuthorizedAdminUser = true;
+        }
+      }
+
+      // If caller is NOT an admin, they MUST be the authorized manager for this specific target team
+      if (!isAuthorizedAdminUser) {
+        const teamAssignedEmail = (teamData.loginEmail || teamData.userEmail || '').trim().toLowerCase();
+        if (!teamAssignedEmail) {
+          throw new Error(`"${teamData.name}" দলের জন্য কোনো ম্যানেজার ইমেইল বরাদ্দ করা নেই। অ্যাডমিন কর্তৃক লগইন ইমেইল নির্ধারণ না করা পর্যন্ত ডাক প্রদান নিষ্ক্রিয় থাকবে।`);
+        }
+        if (verifiedUserEmail !== teamAssignedEmail) {
+          throw new Error('আপনার অ্যাকাউন্টে বরাদ্দকৃত দল ছাড়া অন্য দলের হয়ে ডাক দেওয়া যাবে না।');
+        }
+      }
+
       // 4. Validate bid amount
       const currentHighest = auctionData.currentBid || 0;
-      // Allow flexible quick bid increments +20, +40, +50 (default minimum increment 20)
-      const minStep = auctionData.minIncrement && auctionData.minIncrement <= 20 ? auctionData.minIncrement : 20;
+      // Respect configured minimum increment (allows any non-negative whole number, e.g. 0, 20, 50, 100, 150, 500, 1000)
+      const minStep =
+        typeof auctionData.minIncrement === 'number' && !isNaN(auctionData.minIncrement) && auctionData.minIncrement >= 0
+          ? Math.floor(auctionData.minIncrement)
+          : 0;
 
-      if (bidAmount < currentHighest + minStep && currentHighest > 0) {
+      if (currentHighest > 0 && bidAmount < currentHighest + minStep) {
         throw new Error(
           `ন্যূনতম বৃদ্ধি কমপক্ষে ৳${minStep.toLocaleString()} হতে হবে। পরবর্তী বৈধ ডাক ৳${(currentHighest + minStep).toLocaleString()} হতে হবে।`
         );
@@ -123,24 +177,11 @@ export async function placeAtomicBid(
         );
       }
 
-      // 6. Validate squad size
-      if (teamData.squadCount >= (teamData.maxSquad || 15)) {
-        throw new Error(
-          `দলের সর্বোচ্চ স্কোয়াড সীমা (${teamData.maxSquad || 15}) পূর্ণ হয়ে গেছে! (Team squad capacity reached).`
-        );
-      }
-
-      // Dynamic timer extension: Each valid bid extends the countdown by 15-20s for competitive bidding
-      // Bidding remains open until the administrator confirms 'শেষ ডাক!' (SOLD/UNSOLD).
-      const timerExtensionSeconds = Math.max(15, auctionData.timerSeconds || 20);
-      const newExpiry = Date.now() + timerExtensionSeconds * 1000;
-
-      // 7. Atomic update auction state
+      // 6. Atomic update auction state (overall timer continues without per-player extension)
       transaction.update(auctionDocRef, {
         currentBid: bidAmount,
         highestBidderTeamId: teamId,
         highestBidderTeamName: teamName,
-        timerExpiresAt: newExpiry,
         updatedAt: new Date().toISOString(),
       });
 
@@ -161,9 +202,9 @@ export async function placeAtomicBid(
         seasonId: auctionData.seasonId || 'season-2-2026',
         action: 'BID_PLACED',
         actorId: teamId,
-        actorEmail: actorEmail || teamName,
-        actorRole: 'team',
-        details: `${teamName} দল ৳${bidAmount.toLocaleString()} টাকায় ডাক প্রদান করেছে (খেলোয়াড়: ${auctionData.currentPlayerName})`,
+        actorEmail: verifiedUserEmail,
+        actorRole: isAuthorizedAdminUser ? 'admin' : 'team',
+        details: `${teamName} দল ৳${bidAmount.toLocaleString()} টাকায় ডাক প্রদান করেছে (ম্যানেজার: ${verifiedUserEmail}, খেলোয়াড়: ${auctionData.currentPlayerName})`,
         timestamp: new Date().toISOString(),
       });
 
@@ -315,10 +356,13 @@ export async function markCurrentPlayerUnsold(
 
 /**
  * Administrator loads a player onto the live auction stage.
+ * Persistently uses the saved timer duration.
+ * Does NOT start the countdown automatically when the player appears on the board.
+ * The stage is active for bidding if overall auction timer is running.
  */
 export async function loadPlayerToAuction(
   player: Player,
-  timerSeconds: number = 20,
+  timerSeconds?: number,
   minIncrement: number = 1000,
   adminEmail: string = 'admin'
 ) {
@@ -326,87 +370,406 @@ export async function loadPlayerToAuction(
     const auctionDocRef = doc(db, 'auction', 'current');
     const playerDocRef = doc(db, 'players', player.id);
 
-    const expiresAt = Date.now() + timerSeconds * 1000;
+    // Ensure player is present and marked live in players collection
+    await setDoc(
+      playerDocRef,
+      {
+        ...player,
+        auctionStatus: 'live',
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
 
-    await updateDoc(playerDocRef, {
-      auctionStatus: 'live',
-      updatedAt: new Date().toISOString(),
-    });
+    // Inspect current auction state to check overall timer status and preserve overall settings
+    let isOverallRunning = false;
+    let resolvedSeason = player.seasonId || 'season-2-2026';
+    try {
+      const curSnap = await getDoc(auctionDocRef);
+      if (curSnap.exists()) {
+        const curData = curSnap.data() as AuctionState;
+        resolvedSeason = curData.seasonId || resolvedSeason;
+        isOverallRunning =
+          curData.overallTimerStatus === 'running' &&
+          Boolean(curData.overallTimerExpiresAt && Date.now() < curData.overallTimerExpiresAt);
+      }
+    } catch {
+      // Non-fatal fallback
+    }
 
-    await setDoc(auctionDocRef, {
-      seasonId: player.seasonId || 'season-2-2026',
-      status: 'active',
-      currentPlayerId: player.id,
-      currentPlayerName: player.name,
-      currentPlayerPosition: player.position,
-      currentPlayerAge: player.age,
-      currentPlayerArea: player.area || '',
-      currentPlayerPhoto: player.photoUrl || '',
-      currentBasePrice: player.basePrice,
-      currentBid: player.basePrice,
-      highestBidderTeamId: null,
-      highestBidderTeamName: null,
-      minIncrement: minIncrement || 1000,
-      timerSeconds: timerSeconds || 20,
-      timerExpiresAt: expiresAt,
-      updatedAt: new Date().toISOString(),
-    });
+    // Authoritative form number and registration number
+    const resolvedFormNumber =
+      player.formNumber ||
+      (typeof player.formNumericValue === 'number' && player.formNumericValue > 0
+        ? `ফরম নং ${player.formNumericValue}`
+        : '');
+    const resolvedRegNumber =
+      player.registrationNumber ||
+      (player.id ? `TPL-S2-${player.id.slice(-4).toUpperCase()}` : 'TPL-S2-001');
+
+    // Load player onto board: status is 'active' if overall timer is already running, else 'paused' (ready/standby)
+    await setDoc(
+      auctionDocRef,
+      {
+        seasonId: resolvedSeason,
+        status: isOverallRunning ? 'active' : 'paused',
+        currentPlayerId: player.id,
+        currentPlayerName: player.name,
+        currentPlayerPosition: player.position,
+        currentPlayerCategory: player.category || 'A',
+        currentPlayerAge: player.age,
+        currentPlayerArea: player.area || player.union || '',
+        currentPlayerPhoto: player.photoUrl || '',
+        currentPlayerFormNumber: resolvedFormNumber,
+        currentPlayerRegistrationNumber: resolvedRegNumber,
+        currentBasePrice: player.basePrice,
+        currentBid: player.basePrice,
+        highestBidderTeamId: null,
+        highestBidderTeamName: null,
+        minIncrement:
+          typeof minIncrement === 'number' && !isNaN(minIncrement) && minIncrement >= 0
+            ? Math.floor(minIncrement)
+            : 100,
+        timerExpiresAt: null, // Legacy per-player countdown removed
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
 
     // Create Audit Log
     const auditDocRef = doc(collection(db, 'auditLogs'));
     await setDoc(auditDocRef, {
-      seasonId: player.seasonId || 'season-2-2026',
-      action: 'AUCTION_STARTED',
+      seasonId: resolvedSeason,
+      action: 'AUCTION_PLAYER_LOADED',
       actorEmail: adminEmail,
       actorRole: 'admin',
-      details: `${player.name} (${player.position}) এর নিলাম শুরু হয়েছে। ভিত্তিমূল্য: ৳${player.basePrice.toLocaleString()}`,
+      details: `${player.name} (${player.position}, ${resolvedFormNumber}) নিলাম স্টেজে প্রস্তুত হয়েছে। সামগ্রিক টাইমার স্ট্যাটাস: ${isOverallRunning ? 'চলমান (ডাক সক্রিয়)' : 'স্ট্যান্ডবাই'}।`,
       timestamp: new Date().toISOString(),
     });
 
-    return { success: true, message: `${player.name} এর লাইভ নিলাম শুরু হয়েছে!` };
+    return { success: true, message: `${player.name} (${resolvedFormNumber}) সফলভাবে নিলাম স্টেজে প্রস্তুত হয়েছে!` };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'auction/current');
   }
 }
 
 /**
- * Toggle pause or resume on auction timer
+ * Admin action: Starts the overall auction timer.
+ * Starts only when the authorized admin clicks the "নিলাম শুরু করুন" control.
+ * Persistently saves duration, start epoch, and running status to Firebase.
  */
-export async function toggleAuctionPause(currentStatus: string, remainingSeconds: number = 15) {
+export async function startOverallAuctionTimer(
+  durationSeconds?: number,
+  adminEmail: string = 'admin',
+  seasonId: string = 'season-2-2026'
+): Promise<{ success: boolean; message: string }> {
   try {
     const auctionDocRef = doc(db, 'auction', 'current');
-    if (currentStatus === 'active') {
-      await updateDoc(auctionDocRef, {
-        status: 'paused',
-        timerExpiresAt: null,
+    const curSnap = await getDoc(auctionDocRef);
+    const curData = curSnap.exists() ? (curSnap.data() as AuctionState) : null;
+
+    const chosenDuration =
+      durationSeconds && durationSeconds > 0
+        ? durationSeconds
+        : curData?.overallDurationSeconds || curData?.overallTimerRemaining || 1800;
+
+    const expiresAt = Date.now() + chosenDuration * 1000;
+
+    await setDoc(
+      auctionDocRef,
+      {
+        seasonId: curData?.seasonId || seasonId,
+        overallDurationSeconds: chosenDuration,
+        overallTimerExpiresAt: expiresAt,
+        overallTimerRemaining: chosenDuration,
+        overallTimerStatus: 'running',
+        // If a player is already on stage and not settled, activate bidding stage
+        status:
+          curData?.currentPlayerId && curData.status !== 'sold' && curData.status !== 'unsold'
+            ? 'active'
+            : curData?.status || 'idle',
         updatedAt: new Date().toISOString(),
-      });
-    } else if (currentStatus === 'paused') {
-      await updateDoc(auctionDocRef, {
-        status: 'active',
-        timerExpiresAt: Date.now() + remainingSeconds * 1000,
-        updatedAt: new Date().toISOString(),
-      });
-    }
+      },
+      { merge: true }
+    );
+
+    const auditDocRef = doc(collection(db, 'auditLogs'));
+    await setDoc(auditDocRef, {
+      seasonId: curData?.seasonId || seasonId,
+      action: 'OVERALL_AUCTION_TIMER_STARTED',
+      actorEmail: adminEmail,
+      actorRole: 'admin',
+      details: `সামগ্রিক নিলাম টাইমার চালু করা হয়েছে (সময়সীমা: ${Math.round(chosenDuration / 60)} মিনিট / ${chosenDuration} সেকেন্ড)।`,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      success: true,
+      message: `সামগ্রিক নিলাম সময়সীমা (${Math.round(chosenDuration / 60)} মিনিট) সফলভাবে শুরু হয়েছে!`,
+    };
   } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, 'auction/current');
+    if (isQuotaExceededError(error)) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('tpl:quota-exceeded', { detail: { error } }));
+      }
+      return {
+        success: false,
+        message: formatFriendlyErrorMessage(error),
+      };
+    }
+    console.error('Error starting overall auction timer:', error);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'সামগ্রিক নিলাম টাইমার শুরু করতে ব্যর্থ হয়েছে',
+    };
   }
 }
 
 /**
- * Reset / Restart the timer on current player
+ * Admin action: Pauses the overall auction timer.
+ * Freezes the countdown, saves remaining time in Firebase, and blocks bids.
  */
-export async function resetAuctionTimer(seconds: number = 20) {
+export async function pauseOverallAuctionTimer(
+  adminEmail: string = 'admin',
+  seasonId: string = 'season-2-2026'
+): Promise<{ success: boolean; message: string; remainingSeconds: number }> {
   try {
     const auctionDocRef = doc(db, 'auction', 'current');
-    await updateDoc(auctionDocRef, {
-      status: 'active',
-      timerExpiresAt: Date.now() + seconds * 1000,
-      updatedAt: new Date().toISOString(),
+    const curSnap = await getDoc(auctionDocRef);
+    if (!curSnap.exists()) {
+      return { success: false, message: 'নিলাম সেশন পাওয়া যায়নি', remainingSeconds: 0 };
+    }
+    const curData = curSnap.data() as AuctionState;
+
+    let remaining = curData.overallTimerRemaining || curData.overallDurationSeconds || 1800;
+    if (curData.overallTimerExpiresAt) {
+      remaining = Math.max(0, Math.ceil((curData.overallTimerExpiresAt - Date.now()) / 1000));
+    }
+
+    await setDoc(
+      auctionDocRef,
+      {
+        overallTimerExpiresAt: null,
+        overallTimerRemaining: remaining,
+        overallTimerStatus: remaining === 0 ? 'expired' : 'paused',
+        status: curData.status === 'active' ? 'paused' : curData.status,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+
+    const auditDocRef = doc(collection(db, 'auditLogs'));
+    await setDoc(auditDocRef, {
+      seasonId: curData.seasonId || seasonId,
+      action: 'OVERALL_AUCTION_TIMER_PAUSED',
+      actorEmail: adminEmail,
+      actorRole: 'admin',
+      details: `সামগ্রিক নিলাম সাময়িক স্থগিত (Paused) করা হয়েছে। অবশিষ্ট সময়: ${Math.floor(remaining / 60)}মিনিট ${remaining % 60}সেকেন্ড।`,
+      timestamp: new Date().toISOString(),
     });
+
+    return {
+      success: true,
+      message: `নিলাম সাময়িক স্থগিত করা হয়েছে (অবশিষ্ট সময়: ${Math.floor(remaining / 60)}মিনিট ${remaining % 60}সেকেন্ড)।`,
+      remainingSeconds: remaining,
+    };
   } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, 'auction/current');
+    if (isQuotaExceededError(error)) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('tpl:quota-exceeded', { detail: { error } }));
+      }
+      return {
+        success: false,
+        message: formatFriendlyErrorMessage(error),
+        remainingSeconds: 0,
+      };
+    }
+    console.error('Error pausing overall auction timer:', error);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'টাইমার স্থগিত করতে ত্রুটি হয়েছে',
+      remainingSeconds: 0,
+    };
   }
+}
+
+/**
+ * Admin action: Resumes the overall auction timer from saved remaining time.
+ * Refreshing or reconnecting will NOT extend or reset time.
+ */
+export async function resumeOverallAuctionTimer(
+  adminEmail: string = 'admin',
+  seasonId: string = 'season-2-2026'
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const auctionDocRef = doc(db, 'auction', 'current');
+    const curSnap = await getDoc(auctionDocRef);
+    if (!curSnap.exists()) {
+      return { success: false, message: 'নিলাম সেশন পাওয়া যায়নি' };
+    }
+    const curData = curSnap.data() as AuctionState;
+
+    const remaining =
+      typeof curData.overallTimerRemaining === 'number' && curData.overallTimerRemaining > 0
+        ? curData.overallTimerRemaining
+        : curData.overallDurationSeconds || 1800;
+
+    if (remaining <= 0) {
+      return { success: false, message: 'নিলামের সময় পূর্বেই সমাপ্ত হয়েছে।' };
+    }
+
+    const expiresAt = Date.now() + remaining * 1000;
+
+    await setDoc(
+      auctionDocRef,
+      {
+        overallTimerExpiresAt: expiresAt,
+        overallTimerRemaining: remaining,
+        overallTimerStatus: 'running',
+        status:
+          curData.currentPlayerId && curData.status !== 'sold' && curData.status !== 'unsold'
+            ? 'active'
+            : curData.status,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+
+    const auditDocRef = doc(collection(db, 'auditLogs'));
+    await setDoc(auditDocRef, {
+      seasonId: curData.seasonId || seasonId,
+      action: 'OVERALL_AUCTION_TIMER_RESUMED',
+      actorEmail: adminEmail,
+      actorRole: 'admin',
+      details: `সামগ্রিক নিলাম পুনরায় চালু করা হয়েছে (অবশিষ্ট সময়: ${Math.floor(remaining / 60)}মিনিট ${remaining % 60}সেকেন্ড)।`,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      success: true,
+      message: `নিলাম পুনরায় চালু হয়েছে (অবশিষ্ট সময়: ${Math.floor(remaining / 60)}মিনিট ${remaining % 60}সেকেন্ড)।`,
+    };
+  } catch (error) {
+    if (isQuotaExceededError(error)) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('tpl:quota-exceeded', { detail: { error } }));
+      }
+      return {
+        success: false,
+        message: formatFriendlyErrorMessage(error),
+      };
+    }
+    console.error('Error resuming overall auction timer:', error);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'টাইমার পুনরায় চালু করতে ত্রুটি হয়েছে',
+    };
+  }
+}
+
+/**
+ * Admin action: Sets the overall auction duration setting (e.g. 10m, 30m, 1h, or custom).
+ */
+export async function setOverallAuctionDuration(
+  durationSeconds: number,
+  adminEmail: string = 'admin',
+  seasonId: string = 'season-2-2026'
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const sec = Math.max(60, Math.round(Number(durationSeconds)));
+    const auctionDocRef = doc(db, 'auction', 'current');
+    const curSnap = await getDoc(auctionDocRef);
+    const curData = curSnap.exists() ? (curSnap.data() as AuctionState) : null;
+
+    const isRunning =
+      curData?.overallTimerStatus === 'running' &&
+      Boolean(curData?.overallTimerExpiresAt && Date.now() < curData.overallTimerExpiresAt);
+
+    // If running, recalculate new expiry from right now
+    const expiresAt = isRunning ? Date.now() + sec * 1000 : null;
+
+    await setDoc(
+      auctionDocRef,
+      {
+        overallDurationSeconds: sec,
+        overallTimerRemaining: sec,
+        overallTimerExpiresAt: expiresAt,
+        overallTimerStatus: isRunning ? 'running' : curData?.overallTimerStatus === 'paused' ? 'paused' : 'idle',
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+
+    return {
+      success: true,
+      message: `সামগ্রিক নিলামের সময়সীমা ${Math.round(sec / 60)} মিনিটে নির্ধারিত হয়েছে।`,
+    };
+  } catch (error) {
+    if (isQuotaExceededError(error)) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('tpl:quota-exceeded', { detail: { error } }));
+      }
+      return {
+        success: false,
+        message: formatFriendlyErrorMessage(error),
+      };
+    }
+    console.error('Error setting overall duration:', error);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'সময়সীমা নির্ধারণ করতে সমস্যা হয়েছে',
+    };
+  }
+}
+
+/**
+ * Marks overall timer as expired in Firebase when deadline reached
+ */
+export async function markOverallAuctionExpired(): Promise<void> {
+  try {
+    const auctionDocRef = doc(db, 'auction', 'current');
+    await setDoc(
+      auctionDocRef,
+      {
+        overallTimerStatus: 'expired',
+        overallTimerExpiresAt: null,
+        overallTimerRemaining: 0,
+        status: 'paused',
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Notice setting overall auction expired:', err);
+  }
+}
+
+/**
+ * Starts the countdown timer for the current player on stage using saved duration (legacy fallback).
+ */
+export async function startAuctionCountdown(
+  seconds?: number,
+  adminEmail: string = 'admin'
+): Promise<{ success: boolean; message: string }> {
+  return await startOverallAuctionTimer(seconds, adminEmail);
+}
+
+/**
+ * Toggle pause or resume on auction timer
+ */
+export async function toggleAuctionPause(currentStatus: string, remainingSeconds?: number) {
+  if (currentStatus === 'active') {
+    await pauseOverallAuctionTimer('admin');
+  } else {
+    await resumeOverallAuctionTimer('admin');
+  }
+}
+
+/**
+ * Reset / Restart the timer on current player using saved duration
+ */
+export async function resetAuctionTimer(seconds?: number) {
+  await startOverallAuctionTimer(seconds, 'admin');
 }
 
 /**
@@ -948,13 +1311,25 @@ export async function ensureDefaultSeasonExists(isAdminUser: boolean = false): P
 /**
  * Executes 'শেষ ডাক!' (Final Call / Hammer Down) on the current player atomically.
  * Idempotent: stops bidding, confirms Sold or Unsold, deducts budget safely,
+/**
+ * Executes 'শেষ ডাক!' (Final Call / Hammer Down) or Automatic Expiration Assignment.
+ * Idempotent: stops bidding, confirms Sold or Unsold, deducts budget safely,
  * and automatically loads the next eligible player in the queue.
  * If no eligible players remain, transitions the auction stage into 'completed'.
+ */
+/**
+ * Executes auction finalization (when countdown expires or admin triggers final call).
+ * Idempotent:
+ * - If at least one valid bid exists: marks player SOLD, deducts budget exactly once, increments squad count.
+ * - If no valid bid exists: marks player UNSOLD.
+ * - Prevents duplicate assignments or duplicate budget deductions if page refreshes or multiple clients run.
+ * - Does NOT automatically start the next player's auction, preserving the final result clearly on the board.
  */
 export async function executeFinalCallAndAdvance(
   adminEmail: string,
   seasonId: string = 'season-2-2026',
-  forceUnsold: boolean = false
+  forceUnsold: boolean = false,
+  expectedPlayerId?: string
 ): Promise<{
   success: boolean;
   message: string;
@@ -963,11 +1338,12 @@ export async function executeFinalCallAndAdvance(
   winningTeamName?: string;
   nextPlayerName?: string | null;
   auctionCompleted?: boolean;
+  alreadySettled?: boolean;
 }> {
   try {
     const auctionDocRef = doc(db, 'auction', 'current');
 
-    // Step A: Atomic finalize of current player
+    // Atomic transaction for idempotent auction finalization
     const finalizeOutcome = await runTransaction(db, async transaction => {
       const auctionSnap = await transaction.get(auctionDocRef);
       if (!auctionSnap.exists()) {
@@ -975,7 +1351,7 @@ export async function executeFinalCallAndAdvance(
       }
       const auctionData = auctionSnap.data() as AuctionState;
 
-      // Idempotency: if already settled, don't run twice!
+      // 1. Idempotency Check: if auction is already settled, abort immediately without duplicate deduction
       if (auctionData.status === 'sold' || auctionData.status === 'unsold' || auctionData.status === 'completed') {
         return {
           alreadySettled: true,
@@ -987,22 +1363,51 @@ export async function executeFinalCallAndAdvance(
         };
       }
 
+      if (expectedPlayerId && auctionData.currentPlayerId !== expectedPlayerId) {
+        return {
+          alreadySettled: true,
+          result: 'already_settled' as const,
+          currentPlayerId: auctionData.currentPlayerId,
+          currentPlayerName: auctionData.currentPlayerName,
+          finalPrice: auctionData.currentBid || 0,
+          winningTeamName: auctionData.highestBidderTeamName || '',
+        };
+      }
+
       if (!auctionData.currentPlayerId) {
         throw new Error('স্টেজে কোনো খেলোয়াড় উপস্থিত নেই (No player on stage).');
       }
 
+      // 2. Read Player Document
       const playerDocRef = doc(db, 'players', auctionData.currentPlayerId);
-      const isSold = !forceUnsold && Boolean(auctionData.highestBidderTeamId && auctionData.currentBid > 0);
+      const playerSnap = await transaction.get(playerDocRef);
+      if (!playerSnap.exists()) {
+        throw new Error('খেলোয়াড়ের তথ্য ডেটাবেসে পাওয়া যায়নি।');
+      }
+      const playerData = playerSnap.data() as Player;
+
+      // 3. Check if player was already marked sold or unsold
+      if (playerData.auctionStatus === 'sold' || playerData.auctionStatus === 'unsold') {
+        return {
+          alreadySettled: true,
+          result: (playerData.auctionStatus === 'sold' ? 'sold' : 'unsold') as 'sold' | 'unsold',
+          currentPlayerId: auctionData.currentPlayerId,
+          currentPlayerName: playerData.name || auctionData.currentPlayerName,
+          finalPrice: playerData.finalPrice || auctionData.currentBid || 0,
+          winningTeamName: playerData.winningTeamName || auctionData.highestBidderTeamName || '',
+        };
+      }
+
+      // 4. Determine outcome: Valid bid requires highestBidderTeamId and currentBid > 0
+      const hasValidBid = Boolean(auctionData.highestBidderTeamId && (auctionData.currentBid || 0) > 0);
+      const isSold = !forceUnsold && hasValidBid;
 
       if (isSold && auctionData.highestBidderTeamId) {
         const teamDocRef = doc(db, 'teams', auctionData.highestBidderTeamId);
-        const [playerSnap, teamSnap] = await Promise.all([
-          transaction.get(playerDocRef),
-          transaction.get(teamDocRef),
-        ]);
+        const teamSnap = await transaction.get(teamDocRef);
 
-        if (!playerSnap.exists() || !teamSnap.exists()) {
-          throw new Error('খেলোয়াড় বা দলের তথ্য ডেটাবেসে মেলেনি (Player or Team missing).');
+        if (!teamSnap.exists()) {
+          throw new Error('বিজয়ী দলের তথ্য ডেটাবেসে মেলেনি (Winning team not found).');
         }
 
         const teamData = teamSnap.data() as Team;
@@ -1011,6 +1416,18 @@ export async function executeFinalCallAndAdvance(
         if (teamData.remainingBudget < finalPrice) {
           throw new Error(`দলের বাজেটের সাথে অসঙ্গতি পাওয়া গেছে! অবশিষ্ট বাজেট: ৳${teamData.remainingBudget.toLocaleString()}`);
         }
+
+        // Deduct budget and increment squad count exactly ONCE
+        const newSpentBudget = (teamData.spentBudget || 0) + finalPrice;
+        const newRemainingBudget = teamData.remainingBudget - finalPrice;
+        const newSquadCount = (teamData.squadCount || 0) + 1;
+
+        transaction.update(teamDocRef, {
+          spentBudget: newSpentBudget,
+          remainingBudget: newRemainingBudget,
+          squadCount: newSquadCount,
+          updatedAt: new Date().toISOString(),
+        });
 
         // Update Player to SOLD
         transaction.update(playerDocRef, {
@@ -1021,17 +1438,13 @@ export async function executeFinalCallAndAdvance(
           updatedAt: new Date().toISOString(),
         });
 
-        // Update Team Budget & Squad
-        transaction.update(teamDocRef, {
-          spentBudget: (teamData.spentBudget || 0) + finalPrice,
-          remainingBudget: teamData.remainingBudget - finalPrice,
-          squadCount: (teamData.squadCount || 0) + 1,
-        });
-
-        // Update Auction State
+        // Update Auction State to SOLD (keep player and final result clearly visible on board)
         transaction.update(auctionDocRef, {
           status: 'sold',
           timerExpiresAt: null,
+          currentBid: finalPrice,
+          highestBidderTeamId: teamData.id || auctionData.highestBidderTeamId,
+          highestBidderTeamName: teamData.name,
           updatedAt: new Date().toISOString(),
         });
 
@@ -1042,7 +1455,7 @@ export async function executeFinalCallAndAdvance(
           action: 'PLAYER_SOLD',
           actorEmail: adminEmail,
           actorRole: 'admin',
-          details: `[শেষ ডাক!] খেলোয়াড় ${auctionData.currentPlayerName} কে ৳${finalPrice.toLocaleString()} মূল্যে ${teamData.name} দলের কাছে বিক্রিত ঘোষণা করা হয়েছে।`,
+          details: `[নিলাম নিষ্পত্তি] খেলোয়াড় ${playerData.name} কে ৳${finalPrice.toLocaleString()} মূল্যে ${teamData.name} দলের কাছে বিক্রিত ঘোষণা করা হয়েছে।`,
           timestamp: new Date().toISOString(),
         });
 
@@ -1050,20 +1463,40 @@ export async function executeFinalCallAndAdvance(
           alreadySettled: false,
           result: 'sold' as const,
           currentPlayerId: auctionData.currentPlayerId,
-          currentPlayerName: auctionData.currentPlayerName,
+          currentPlayerName: playerData.name,
           finalPrice,
           winningTeamName: teamData.name,
+          playerData: {
+            id: playerData.id,
+            name: playerData.name,
+            banglaName: playerData.banglaName,
+            photoUrl: playerData.photoUrl,
+            position: playerData.position,
+            category: playerData.category,
+            formNumber: playerData.formNumber,
+            registrationNumber: playerData.registrationNumber,
+          },
+          winningTeamData: {
+            id: teamData.id,
+            name: teamData.name,
+            logoUrl: teamData.logoUrl,
+          },
         };
       } else {
-        // UNSOLD outcome
+        // UNSOLD outcome: No valid bid placed before timer reached zero
         transaction.update(playerDocRef, {
           auctionStatus: 'unsold',
+          winningTeamId: null,
+          winningTeamName: null,
+          finalPrice: null,
           updatedAt: new Date().toISOString(),
         });
 
         transaction.update(auctionDocRef, {
           status: 'unsold',
           timerExpiresAt: null,
+          highestBidderTeamId: null,
+          highestBidderTeamName: null,
           updatedAt: new Date().toISOString(),
         });
 
@@ -1073,7 +1506,7 @@ export async function executeFinalCallAndAdvance(
           action: 'PLAYER_UNSOLD',
           actorEmail: adminEmail,
           actorRole: 'admin',
-          details: `[শেষ ডাক!] খেলোয়াড় ${auctionData.currentPlayerName} অবিক্রিত (UNSOLD) হিসেবে নিলাম সমাপ্ত হয়েছে।`,
+          details: `[নিলাম নিষ্পত্তি] খেলোয়াড় ${playerData.name} অবিক্রিত (UNSOLD) হিসেবে নিলাম সমাপ্ত হয়েছে।`,
           timestamp: new Date().toISOString(),
         });
 
@@ -1081,9 +1514,20 @@ export async function executeFinalCallAndAdvance(
           alreadySettled: false,
           result: 'unsold' as const,
           currentPlayerId: auctionData.currentPlayerId,
-          currentPlayerName: auctionData.currentPlayerName,
+          currentPlayerName: playerData.name,
           finalPrice: 0,
           winningTeamName: '',
+          playerData: {
+            id: playerData.id,
+            name: playerData.name,
+            banglaName: playerData.banglaName,
+            photoUrl: playerData.photoUrl,
+            position: playerData.position,
+            category: playerData.category,
+            formNumber: playerData.formNumber,
+            registrationNumber: playerData.registrationNumber,
+          },
+          winningTeamData: null,
         };
       }
     });
@@ -1091,92 +1535,350 @@ export async function executeFinalCallAndAdvance(
     if (finalizeOutcome.alreadySettled) {
       return {
         success: true,
-        result: 'already_settled',
+        alreadySettled: true,
+        result: finalizeOutcome.result,
+        finalPrice: finalizeOutcome.finalPrice,
+        winningTeamName: finalizeOutcome.winningTeamName,
         message: 'এই খেলোয়াড়ের ডাক পূর্বেই সংরক্ষিত হয়েছে।',
       };
     }
 
-    // Step B: Query next eligible player in the auction queue for this season
-    const playersSnap = await getDocs(collection(db, 'players'));
-    const allPlayers = playersSnap.docs.map(d => ({ id: d.id, ...d.data() } as Player));
-
-    // Eligible players: approved, not sold, not the one just finalized, matching season
-    const eligibleNext = allPlayers.filter(p => {
-      const matchSeason = (p.seasonId || 'season-2-2026') === seasonId;
-      const isApproved = p.approvalStatus === 'approved';
-      const isPendingAuction = p.auctionStatus === 'upcoming' || !p.auctionStatus;
-      const isDifferent = p.id !== finalizeOutcome.currentPlayerId;
-      return matchSeason && isApproved && isPendingAuction && isDifferent;
-    });
-
-    // Step C: If next eligible player found, load them onto stage
-    if (eligibleNext.length > 0) {
-      const nextPlayer = eligibleNext[0];
-      // Get season config for default timer & increment
-      let timerSec = 20;
-      let minInc = 1000;
-      try {
-        const sSnap = await getDoc(doc(db, 'seasons', seasonId));
-        if (sSnap.exists()) {
-          const sData = sSnap.data() as Season;
-          if (sData.defaultTimerSeconds) timerSec = sData.defaultTimerSeconds;
-          if (sData.defaultMinIncrement) minInc = sData.defaultMinIncrement;
-        }
-      } catch (e) {
-        // use defaults
-      }
-
-      await loadPlayerToAuction(nextPlayer, timerSec, minInc, adminEmail);
-
-      const outcomeMsg = finalizeOutcome.result === 'sold'
-        ? `[শেষ ডাক!] ${finalizeOutcome.currentPlayerName} ৳${finalizeOutcome.finalPrice?.toLocaleString()} টাকায় ${finalizeOutcome.winningTeamName} দলের কাছে বিক্রিত হয়েছে! পরবর্তী খেলোয়াড় ${nextPlayer.name} স্টেজে এসেছে।`
-        : `[শেষ ডাক!] ${finalizeOutcome.currentPlayerName} অবিক্রিত (UNSOLD) হয়েছে। পরবর্তী খেলোয়াড় ${nextPlayer.name} স্টেজে এসেছে।`;
-
-      return {
-        success: true,
-        result: finalizeOutcome.result,
+    // Automatic non-blocking poster generation upon auction finalization
+    if (finalizeOutcome.playerData) {
+      generateAndSavePoster({
+        player: finalizeOutcome.playerData,
+        status: finalizeOutcome.result,
         finalPrice: finalizeOutcome.finalPrice,
-        winningTeamName: finalizeOutcome.winningTeamName,
-        nextPlayerName: nextPlayer.name,
-        auctionCompleted: false,
-        message: outcomeMsg,
-      };
-    } else {
-      // Step D: No eligible players remain -> Auction Completed state!
-      await updateDoc(auctionDocRef, {
-        status: 'completed',
-        currentPlayerId: null,
-        currentPlayerName: null,
-        timerExpiresAt: null,
-        updatedAt: new Date().toISOString(),
+        winningTeam: finalizeOutcome.winningTeamData,
+        season: {
+          id: seasonId,
+          name: 'Teesta Premier League Season 2',
+        },
+      }).catch(posterErr => {
+        console.warn('Background poster generation notice:', posterErr);
       });
-
-      const auditDocRef = doc(collection(db, 'auditLogs'));
-      await setDoc(auditDocRef, {
-        seasonId,
-        action: 'AUCTION_COMPLETED',
-        actorEmail: adminEmail,
-        actorRole: 'admin',
-        details: `সিজন '${seasonId}' এর সমস্ত অনুমোদিত খেলোয়াড়ের লাইভ অকশন সম্পন্ন হয়েছে।`,
-        timestamp: new Date().toISOString(),
-      });
-
-      return {
-        success: true,
-        result: finalizeOutcome.result,
-        finalPrice: finalizeOutcome.finalPrice,
-        winningTeamName: finalizeOutcome.winningTeamName,
-        nextPlayerName: null,
-        auctionCompleted: true,
-        message: 'অকশন সফলভাবে সমাপ্ত হয়েছে! আর কোনো ড্রাফট খেলোয়াড় বাকি নেই (Auction Completed).',
-      };
     }
+
+    const outcomeMsg = finalizeOutcome.result === 'sold'
+      ? `খেলোয়াড় ${finalizeOutcome.currentPlayerName} ৳${finalizeOutcome.finalPrice?.toLocaleString()} মূল্যে ${finalizeOutcome.winningTeamName} দলের কাছে বিক্রিত (SOLD) হয়েছে!`
+      : `খেলোয়াড় ${finalizeOutcome.currentPlayerName} অবিক্রিত (UNSOLD) হিসেবে নির্ধারিত হয়েছে।`;
+
+    return {
+      success: true,
+      alreadySettled: false,
+      result: finalizeOutcome.result,
+      finalPrice: finalizeOutcome.finalPrice,
+      winningTeamName: finalizeOutcome.winningTeamName,
+      auctionCompleted: false,
+      message: outcomeMsg,
+    };
   } catch (err: unknown) {
     console.error('Final call error:', err);
     return {
       success: false,
       result: 'unsold',
-      message: err instanceof Error ? err.message : 'শেষ ডাক প্রক্রিয়াকরণে ত্রুটি হয়েছে',
+      message: err instanceof Error ? err.message : 'নিষ্পত্তি প্রক্রিয়াকরণে ত্রুটি হয়েছে',
+    };
+  }
+}
+
+/**
+ * Admin action: Cleans / Resets accidental or mistaken bids on current player.
+ * Cancels active countdown, restores starting base price, clears highest bidder,
+ * and deletes unfinalized bids for this player.
+ * Does NOT delete any players, teams, registration data, or completed auction records.
+ * Rejects if the player is already finalized.
+ */
+/**
+ * Admin action: Safely cleans, reverses, or resets auction state for the current player.
+ * Requirement 3:
+ * - If player was SOLD: Atomically reverses the exact transaction: restores deducted amount to winning team's
+ *   remaining budget, decrements squad count, removes team assignment from player, and sets player ready for re-auction.
+ * - If player was UNSOLD: Safely resets player to ready/standby state for re-auction without inventing any refund.
+ * - If auction is IN PROGRESS: Cancels active countdown, clears mistaken bids, and restores starting base price.
+ * - Idempotent: Checks actual status to prevent duplicate refunds or double deductions.
+ * - Preserves player records, photos, IDs, categories, and completed auction audit logs.
+ */
+export async function cleanCurrentPlayerBids(
+  adminEmail: string,
+  seasonId: string = 'season-2-2026'
+): Promise<{
+  success: boolean;
+  message: string;
+  actionTaken?: 'refunded_sold' | 'reset_unsold' | 'cleaned_in_progress';
+  refundedAmount?: number;
+  refundedTeamName?: string;
+}> {
+  try {
+    const auctionDocRef = doc(db, 'auction', 'current');
+
+    const result = await runTransaction(db, async transaction => {
+      const auctionSnap = await transaction.get(auctionDocRef);
+      if (!auctionSnap.exists()) {
+        throw new Error('কোনো সক্রিয় নিলাম সেশন পাওয়া যায়নি।');
+      }
+      const auctionData = auctionSnap.data() as AuctionState;
+
+      if (!auctionData.currentPlayerId) {
+        throw new Error('স্টেজে কোনো খেলোয়াড় উপস্থিত নেই।');
+      }
+
+      const playerDocRef = doc(db, 'players', auctionData.currentPlayerId);
+      const playerSnap = await transaction.get(playerDocRef);
+      if (!playerSnap.exists()) {
+        throw new Error('খেলোয়াড়ের তথ্য ডেটাবেসে পাওয়া যায়নি।');
+      }
+      const playerData = playerSnap.data() as Player;
+
+      const startingBasePrice = playerData.basePrice || auctionData.currentBasePrice || 2000;
+      let actionTaken: 'refunded_sold' | 'reset_unsold' | 'cleaned_in_progress' = 'cleaned_in_progress';
+      let refundedAmount = 0;
+      let refundedTeamName = '';
+
+      // Case 1: Player was SOLD (Safely reverse sale transaction)
+      if (auctionData.status === 'sold' || playerData.auctionStatus === 'sold') {
+        const winningTeamId = playerData.winningTeamId || auctionData.highestBidderTeamId;
+        const finalPrice = playerData.finalPrice || auctionData.currentBid || 0;
+
+        if (winningTeamId && finalPrice > 0) {
+          const teamDocRef = doc(db, 'teams', winningTeamId);
+          const teamSnap = await transaction.get(teamDocRef);
+
+          if (teamSnap.exists()) {
+            const teamData = teamSnap.data() as Team;
+            refundedAmount = finalPrice;
+            refundedTeamName = teamData.name;
+
+            // Atomically restore remainingBudget, reduce spentBudget, and decrement squadCount
+            transaction.update(teamDocRef, {
+              spentBudget: Math.max(0, (teamData.spentBudget || 0) - finalPrice),
+              remainingBudget: (teamData.remainingBudget || 0) + finalPrice,
+              squadCount: Math.max(0, (teamData.squadCount || 0) - 1),
+              updatedAt: new Date().toISOString(),
+            });
+          }
+        }
+
+        // Reset player document to ready for re-auction
+        transaction.update(playerDocRef, {
+          auctionStatus: 'live',
+          winningTeamId: null,
+          winningTeamName: null,
+          finalPrice: null,
+          updatedAt: new Date().toISOString(),
+        });
+
+        // Reset auction room stage back to ready/standby for this player
+        transaction.update(auctionDocRef, {
+          status: 'paused',
+          currentBid: startingBasePrice,
+          highestBidderTeamId: null,
+          highestBidderTeamName: null,
+          timerExpiresAt: null,
+          updatedAt: new Date().toISOString(),
+        });
+
+        // Append Audit Log
+        const auditDocRef = doc(collection(db, 'auditLogs'));
+        transaction.set(auditDocRef, {
+          seasonId: auctionData.seasonId || seasonId,
+          action: 'AUCTION_RE_AUCTION_REVERSED',
+          actorEmail: adminEmail,
+          actorRole: 'admin',
+          details: `[ক্লিন / রি-অকশন রিসেট] বিক্রিত খেলোয়াড় '${playerData.name}'-এর বিক্রয় লেনদেন নিরাপদভাবে বাতিল করা হয়েছে। দল '${refundedTeamName}'-কে ৳${refundedAmount.toLocaleString()} ফেরত ও স্কোয়াড সংখ্যা ১ কমানো হয়েছে। খেলোয়াড় পুনরায় নিলাম স্টেজে প্রস্তুত।`,
+          timestamp: new Date().toISOString(),
+        });
+
+        actionTaken = 'refunded_sold';
+      }
+      // Case 2: Player was UNSOLD (Reset back to ready for re-auction)
+      else if (auctionData.status === 'unsold' || playerData.auctionStatus === 'unsold') {
+        transaction.update(playerDocRef, {
+          auctionStatus: 'live',
+          winningTeamId: null,
+          winningTeamName: null,
+          finalPrice: null,
+          updatedAt: new Date().toISOString(),
+        });
+
+        transaction.update(auctionDocRef, {
+          status: 'paused',
+          currentBid: startingBasePrice,
+          highestBidderTeamId: null,
+          highestBidderTeamName: null,
+          timerExpiresAt: null,
+          updatedAt: new Date().toISOString(),
+        });
+
+        const auditDocRef = doc(collection(db, 'auditLogs'));
+        transaction.set(auditDocRef, {
+          seasonId: auctionData.seasonId || seasonId,
+          action: 'AUCTION_UNSOLD_RE_AUCTION',
+          actorEmail: adminEmail,
+          actorRole: 'admin',
+          details: `[ক্লিন / রি-অকশন রিসেট] অবিক্রিত খেলোয়াড় '${playerData.name}'-কে পুনরায় নিলাম স্টেজে প্রস্তুত করা হয়েছে (ভিত্তিমূল্য: ৳${startingBasePrice.toLocaleString()})।`,
+          timestamp: new Date().toISOString(),
+        });
+
+        actionTaken = 'reset_unsold';
+      }
+      // Case 3: Auction was In-Progress (active or paused) with accidental bids
+      else {
+        transaction.update(auctionDocRef, {
+          status: 'paused',
+          currentBid: startingBasePrice,
+          highestBidderTeamId: null,
+          highestBidderTeamName: null,
+          timerExpiresAt: null,
+          updatedAt: new Date().toISOString(),
+        });
+
+        const auditDocRef = doc(collection(db, 'auditLogs'));
+        transaction.set(auditDocRef, {
+          seasonId: auctionData.seasonId || seasonId,
+          action: 'BID_RESET_CLEANED',
+          actorEmail: adminEmail,
+          actorRole: 'admin',
+          details: `[ক্লিন / বিড রিসেট] খেলোয়াড় '${playerData.name}'-এর অনাকাঙ্ক্ষিত ডাকসমূহ বাতিল করে প্রারম্ভিক ভিত্তিমূল্য ৳${startingBasePrice.toLocaleString()}-এ ফিরিয়ে নেওয়া হয়েছে (কাউন্টডাউন স্ট্যান্ডবাই)।`,
+          timestamp: new Date().toISOString(),
+        });
+
+        actionTaken = 'cleaned_in_progress';
+      }
+
+      return {
+        playerName: playerData.name || auctionData.currentPlayerName,
+        playerId: auctionData.currentPlayerId,
+        startingBasePrice,
+        actionTaken,
+        refundedAmount,
+        refundedTeamName,
+      };
+    });
+
+    // Also delete any unfinalized temporary bids in subcollection
+    try {
+      const bidsQuery = query(
+        collection(db, 'auction', 'current', 'bids'),
+        where('playerId', '==', result.playerId)
+      );
+      const bidsSnap = await getDocs(bidsQuery);
+      if (!bidsSnap.empty) {
+        const batch = writeBatch(db);
+        bidsSnap.forEach(bDoc => batch.delete(bDoc.ref));
+        await batch.commit();
+      }
+    } catch (cleanBidsErr) {
+      console.warn('Note: Could not clean subcollection bids:', cleanBidsErr);
+    }
+
+    let successMsg = '';
+    if (result.actionTaken === 'refunded_sold') {
+      successMsg = `খেলোয়াড় '${result.playerName}'-এর বিক্রয় বাতিল ও দল '${result.refundedTeamName}'-কে ৳${result.refundedAmount.toLocaleString()} বাজেট ফেরত দেওয়া হয়েছে। খেলোয়াড় পুনরায় নিলামের জন্য প্রস্তুত।`;
+    } else if (result.actionTaken === 'reset_unsold') {
+      successMsg = `খেলোয়াড় '${result.playerName}'-কে সফলভাবে প্রারম্ভিক ভিত্তিমূল্যে (৳${result.startingBasePrice.toLocaleString()}) পুনরায় নিলামের জন্য প্রস্তুত করা হয়েছে।`;
+    } else {
+      successMsg = `খেলোয়াড় '${result.playerName}'-এর ভুল ডাক বাতিল করে প্রারম্ভিক ভিত্তিমূল্যে ফিরিয়ে আনা হয়েছে।`;
+    }
+
+    return {
+      success: true,
+      message: successMsg,
+      actionTaken: result.actionTaken,
+      refundedAmount: result.refundedAmount,
+      refundedTeamName: result.refundedTeamName,
+    };
+  } catch (err: unknown) {
+    console.error('Error cleaning mistaken bids:', err);
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'বিড ক্লিন করতে ত্রুটি হয়েছে',
+    };
+  }
+}
+
+/**
+ * Admin action: Updates the auction countdown duration persistently in Firebase.
+ * Supports presets (15, 20, 30, 60s, etc.) or any custom duration (3 to 300s).
+ * Persists immediately to auction/current, seasons collection, and league settings
+ * so the configuration survives browser refresh, logout, or session restart.
+ */
+export async function updateAuctionTimerDuration(
+  seconds: number,
+  seasonId: string = 'season-2-2026',
+  adminEmail: string = 'admin'
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const sec = Math.round(Number(seconds));
+    if (isNaN(sec) || sec < 3 || sec > 300) {
+      return {
+        success: false,
+        message: 'কাউন্টডাউন সময়কাল ৩ থেকে ৩০০ সেকেন্ডের মধ্যে হতে হবে (Duration must be between 3 and 300 seconds).',
+      };
+    }
+
+    const auctionDocRef = doc(db, 'auction', 'current');
+    const seasonDocRef = doc(db, 'seasons', seasonId);
+    const settingsDocRef = doc(db, 'settings', 'league');
+
+    // 1. Persist in auction/current
+    await setDoc(
+      auctionDocRef,
+      {
+        timerSeconds: sec,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+
+    // 2. Persist in seasons collection
+    try {
+      await setDoc(
+        seasonDocRef,
+        {
+          defaultTimerSeconds: sec,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // ignore if missing
+    }
+
+    // 3. Persist in settings/league
+    try {
+      await setDoc(
+        settingsDocRef,
+        {
+          defaultTimerSeconds: sec,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // ignore
+    }
+
+    // 4. Audit Log
+    const auditDocRef = doc(collection(db, 'auditLogs'));
+    await setDoc(auditDocRef, {
+      seasonId,
+      action: 'TIMER_DURATION_CONFIGURED',
+      actorEmail: adminEmail,
+      actorRole: 'admin',
+      details: `কাউন্টডাউন টাইমার সময়কাল ${sec} সেকেন্ড নির্ধারণ করা হয়েছে (Firebase এ সংরক্ষিত)।`,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      success: true,
+      message: `কাউন্টডাউন সময়কাল সফলভাবে ${sec} সেকেন্ড নির্ধারণ করা হয়েছে (Firebase এ সংরক্ষিত)।`,
+    };
+  } catch (err: any) {
+    console.error('Error updating auction timer duration:', err);
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'টাইমার পরিবর্তন করতে ত্রুটি হয়েছে',
     };
   }
 }
@@ -1325,10 +2027,14 @@ export async function safeDeletePlayer(
     return await runTransaction(db, async transaction => {
       // 1. Check live auction state
       const aSnap = await transaction.get(auctionRef);
+      let cleanAuctionBoard = false;
       if (aSnap.exists()) {
         const aData = aSnap.data() as AuctionState;
-        if (aData.currentPlayerId === playerId && (aData.status === 'active' || aData.status === 'paused')) {
-          throw new Error('এই খেলোয়াড় বর্তমানে লাইভ নিলামে রয়েছেন! নিলাম শেষ না করে খেলোয়াড় মোছা যাবে না।');
+        if (aData.currentPlayerId === playerId) {
+          if (aData.status === 'active' || aData.status === 'paused') {
+            throw new Error('এই খেলোয়াড় বর্তমানে লাইভ নিলামে রয়েছেন! নিলাম শেষ না করে খেলোয়াড় মোছা যাবে না।');
+          }
+          cleanAuctionBoard = true;
         }
       }
 
@@ -1351,6 +2057,26 @@ export async function safeDeletePlayer(
             squadCount: Math.max(0, (tData.squadCount || 0) - 1),
           });
         }
+      }
+
+      // If player was on current auction board, reset board back to idle
+      if (cleanAuctionBoard) {
+        transaction.update(auctionRef, {
+          status: 'idle',
+          currentPlayerId: null,
+          currentPlayerName: null,
+          currentPlayerPosition: null,
+          currentPlayerCategory: null,
+          currentPlayerAge: null,
+          currentPlayerArea: null,
+          currentPlayerPhoto: null,
+          currentBasePrice: 0,
+          currentBid: 0,
+          highestBidderTeamId: null,
+          highestBidderTeamName: null,
+          timerExpiresAt: null,
+          updatedAt: new Date().toISOString(),
+        });
       }
 
       // 4. Delete player
@@ -1377,6 +2103,280 @@ export async function safeDeletePlayer(
     return {
       success: false,
       message: err instanceof Error ? err.message : 'খেলোয়াড় মুছতে ব্যর্থ হয়েছে।',
+    };
+  }
+}
+
+/**
+ * Admin removes the current player from the Live Auction Board.
+ * - Sets the player's auctionStatus back to 'upcoming' (available in draft list),
+ *   preserving all registrations, photos, form numbers, categories, base prices.
+ * - Does NOT mark the player SOLD or UNSOLD.
+ * - Does NOT deduct or refund any team budget.
+ * - Cleans the auction board back to idle.
+ * - Logs the action to audit trail.
+ */
+export async function removePlayerFromAuctionBoard(
+  adminEmail: string = 'admin',
+  seasonId: string = 'season-2-2026'
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const auctionDocRef = doc(db, 'auction', 'current');
+
+    const result = await runTransaction(db, async transaction => {
+      const aSnap = await transaction.get(auctionDocRef);
+      if (!aSnap.exists()) {
+        throw new Error('কোনো সক্রিয় নিলাম সেশন পাওয়া যায়নি।');
+      }
+
+      const aData = aSnap.data() as AuctionState;
+      const playerId = aData.currentPlayerId;
+
+      if (!playerId) {
+        throw new Error('বর্তমানে নিলাম বোর্ডে কোনো খেলোয়াড় নেই।');
+      }
+
+      const playerDocRef = doc(db, 'players', playerId);
+      const pSnap = await transaction.get(playerDocRef);
+
+      let playerName = aData.currentPlayerName || 'খেলোয়াড়';
+      if (pSnap.exists()) {
+        const pData = pSnap.data() as Player;
+        playerName = pData.name || playerName;
+
+        // If player is not already sold, return to upcoming draft pool
+        if (pData.auctionStatus !== 'sold') {
+          transaction.update(playerDocRef, {
+            auctionStatus: 'upcoming',
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+
+      // Reset auction board back to idle (standby for next player selection)
+      transaction.update(auctionDocRef, {
+        status: 'idle',
+        currentPlayerId: null,
+        currentPlayerName: null,
+        currentPlayerPosition: null,
+        currentPlayerCategory: null,
+        currentPlayerAge: null,
+        currentPlayerArea: null,
+        currentPlayerPhoto: null,
+        currentBasePrice: 0,
+        currentBid: 0,
+        highestBidderTeamId: null,
+        highestBidderTeamName: null,
+        timerExpiresAt: null,
+        updatedAt: new Date().toISOString(),
+      });
+
+      // Audit Log
+      const auditRef = doc(collection(db, 'auditLogs'));
+      transaction.set(auditRef, {
+        seasonId: aData.seasonId || seasonId,
+        action: 'AUCTION_PLAYER_REMOVED_FROM_BOARD',
+        actorEmail: adminEmail,
+        actorRole: 'admin',
+        details: `খেলোয়াড় "${playerName}" কে নিলাম বোর্ড থেকে সরিয়ে ড্রাফট তালিকায় (upcoming) ফিরিয়ে নেওয়া হয়েছে।`,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        success: true,
+        message: `খেলোয়াড় "${playerName}" কে সফলভাবে নিলাম বোর্ড থেকে সরানো হয়েছে।`,
+      };
+    });
+
+    // Clean transient bids from auction/current/bids subcollection
+    try {
+      const bidsSnap = await getDocs(collection(db, 'auction', 'current', 'bids'));
+      if (!bidsSnap.empty) {
+        const batch = writeBatch(db);
+        bidsSnap.forEach(bDoc => {
+          batch.delete(bDoc.ref);
+        });
+        await batch.commit();
+      }
+    } catch (bidsErr) {
+      console.warn('Notice cleaning bids on removePlayerFromAuctionBoard:', bidsErr);
+    }
+
+    return result;
+  } catch (err: any) {
+    console.error('Error removing player from auction board:', err);
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'নিলাম বোর্ড থেকে খেলোয়াড় সরাতে ব্যর্থ হয়েছে।',
+    };
+  }
+}
+
+/**
+ * Admin action: Manually add any player to a team's squad without squad size limits.
+ * Requirement:
+ * - Admin can add 16th, 20th, or any number of players.
+ * - Prevents adding the same player to the same team more than once (duplicate guard).
+ * - Does NOT alter the team's remaining budget or spent budget (only live auction does that).
+ * - Updates player's winningTeamId, winningTeamName, and auctionStatus: 'sold'.
+ * - Increments team's squadCount.
+ * - Restricted to authorized admins.
+ */
+export async function manualAddPlayerToSquad(
+  teamId: string,
+  playerId: string,
+  adminEmail: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const teamDocRef = doc(db, 'teams', teamId);
+    const playerDocRef = doc(db, 'players', playerId);
+
+    const result = await runTransaction(db, async transaction => {
+      const teamSnap = await transaction.get(teamDocRef);
+      if (!teamSnap.exists()) {
+        throw new Error('দলটি ডেটাবেসে খুঁজে পাওয়া যায়নি (Team not found).');
+      }
+
+      const playerSnap = await transaction.get(playerDocRef);
+      if (!playerSnap.exists()) {
+        throw new Error('খেলোয়াড়টি ডেটাবেসে খুঁজে পাওয়া যায়নি (Player not found).');
+      }
+
+      const teamData = teamSnap.data() as Team;
+      const playerData = playerSnap.data() as Player;
+
+      // Duplicate guard: Prevent adding the same player to the same team's squad more than once
+      if (playerData.winningTeamId === teamId) {
+        throw new Error(`খেলোয়াড় "${playerData.name}" ইতিমধ্যেই "${teamData.name}" দলের স্কোয়াডে যুক্ত আছেন!`);
+      }
+
+      // If player was in another team, handle previous team's squadCount decrement
+      if (playerData.winningTeamId && playerData.winningTeamId !== teamId) {
+        const prevTeamRef = doc(db, 'teams', playerData.winningTeamId);
+        const prevTeamSnap = await transaction.get(prevTeamRef);
+        if (prevTeamSnap.exists()) {
+          const prevTeamData = prevTeamSnap.data() as Team;
+          transaction.update(prevTeamRef, {
+            squadCount: Math.max(0, (prevTeamData.squadCount || 1) - 1),
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+
+      // 1. Update Player Record: link to this team, keep budget unaffected
+      transaction.update(playerDocRef, {
+        winningTeamId: teamId,
+        winningTeamName: teamData.name,
+        auctionStatus: 'sold',
+        finalPrice:
+          playerData.finalPrice !== undefined && playerData.finalPrice !== null
+            ? playerData.finalPrice
+            : (playerData.basePrice || 0),
+        updatedAt: new Date().toISOString(),
+      });
+
+      // 2. Update Team Record: increment squadCount without modifying spentBudget or remainingBudget
+      const updatedSquadCount = (teamData.squadCount || 0) + 1;
+      transaction.update(teamDocRef, {
+        squadCount: updatedSquadCount,
+        updatedAt: new Date().toISOString(),
+      });
+
+      // 3. Audit Log
+      const auditRef = doc(collection(db, 'auditLogs'));
+      transaction.set(auditRef, {
+        action: 'ADMIN_MANUAL_SQUAD_ADD',
+        actorEmail: adminEmail,
+        actorRole: 'admin',
+        teamId,
+        teamName: teamData.name,
+        playerId,
+        playerName: playerData.name,
+        details: `অ্যাডমিন "${adminEmail}" খেলোয়াড় "${playerData.name}" কে ম্যানুয়ালি "${teamData.name}" দলের স্কোয়াডে যুক্ত করেছেন (নতুন স্কোয়াড সংখ্যা: ${updatedSquadCount} জন)।`,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        success: true,
+        message: `খেলোয়াড় "${playerData.name}" কে সফলভাবে "${teamData.name}" দলের স্কোয়াডে যুক্ত করা হয়েছে (মোট স্কোয়াড: ${updatedSquadCount} জন)।`,
+      };
+    });
+
+    return result;
+  } catch (err: any) {
+    console.error('Error in manualAddPlayerToSquad:', err);
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'খেলোয়াড় স্কোয়াডে যুক্ত করতে সমস্যা হয়েছে।',
+    };
+  }
+}
+
+/**
+ * Admin action: Manually remove a player from a team's squad.
+ * Resets player to upcoming draft pool and decrements squadCount without changing team budget.
+ */
+export async function manualRemovePlayerFromSquad(
+  teamId: string,
+  playerId: string,
+  adminEmail: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const teamDocRef = doc(db, 'teams', teamId);
+    const playerDocRef = doc(db, 'players', playerId);
+
+    const result = await runTransaction(db, async transaction => {
+      const teamSnap = await transaction.get(teamDocRef);
+      const playerSnap = await transaction.get(playerDocRef);
+
+      if (!teamSnap.exists() || !playerSnap.exists()) {
+        throw new Error('দল বা খেলোয়াড়ের তথ্য পাওয়া যায়নি।');
+      }
+
+      const teamData = teamSnap.data() as Team;
+      const playerData = playerSnap.data() as Player;
+
+      // 1. Reset player assignment
+      transaction.update(playerDocRef, {
+        winningTeamId: null,
+        winningTeamName: null,
+        auctionStatus: 'upcoming',
+        updatedAt: new Date().toISOString(),
+      });
+
+      // 2. Decrement team squadCount
+      const updatedSquadCount = Math.max(0, (teamData.squadCount || 1) - 1);
+      transaction.update(teamDocRef, {
+        squadCount: updatedSquadCount,
+        updatedAt: new Date().toISOString(),
+      });
+
+      // 3. Audit Log
+      const auditRef = doc(collection(db, 'auditLogs'));
+      transaction.set(auditRef, {
+        action: 'ADMIN_MANUAL_SQUAD_REMOVE',
+        actorEmail: adminEmail,
+        actorRole: 'admin',
+        teamId,
+        teamName: teamData.name,
+        playerId,
+        playerName: playerData.name,
+        details: `অ্যাডমিন "${adminEmail}" খেলোয়াড় "${playerData.name}" কে "${teamData.name}" দলের স্কোয়াড থেকে অপসারণ করেছেন।`,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        success: true,
+        message: `খেলোয়াড় "${playerData.name}" কে "${teamData.name}" দলের স্কোয়াড থেকে অপসারণ করা হয়েছে।`,
+      };
+    });
+
+    return result;
+  } catch (err: any) {
+    console.error('Error in manualRemovePlayerFromSquad:', err);
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'খেলোয়াড় অপসারণ করতে ব্যর্থ হয়েছে।',
     };
   }
 }

@@ -544,3 +544,214 @@ export async function deletePlayerPhoto(photoUrl?: string | null): Promise<boole
     return true;
   }
 }
+
+/**
+ * Uploads a team logo with validation, canvas compression, and resilient fallback.
+ */
+export async function uploadTeamLogo(
+  file: File,
+  teamId: string,
+  seasonId: string = 'season-2-2026',
+  language: 'bn' | 'en' = 'bn',
+  options?: {
+    onProgress?: (progressPercent: number) => void;
+    timeoutMs?: number;
+  }
+): Promise<UploadPhotoResult> {
+  const config = getStorageConfigInfo();
+
+  // 1. Validate
+  const validation = validateImageFile(file, language);
+  if (!validation.valid) {
+    return {
+      success: false,
+      url: '',
+      storageType: 'direct_optimized',
+      errorType: 'VALIDATION_ERROR',
+      message: validation.error || 'Invalid file',
+    };
+  }
+
+  // 2. Compress on device (400x400 max for crisp team logos)
+  let compressed: CompressedImageResult;
+  try {
+    compressed = await compressImageClientSide(file, 400, 0.85);
+    options?.onProgress?.(25);
+  } catch (compErr: any) {
+    console.error('Client compression error:', compErr);
+    return {
+      success: false,
+      url: '',
+      storageType: 'direct_optimized',
+      errorType: 'COMPRESSION_FAILED',
+      message:
+        language === 'bn'
+          ? 'লোগো প্রসেস করতে সমস্যা হয়েছে। অনুগ্রহ করে অন্য ছবি নির্বাচন করুন।'
+          : 'Failed to process logo. Please try another image.',
+      errorDetail: compErr?.message,
+    };
+  }
+
+  // 3. Check if Firebase Storage is initialized
+  if (!storage || !config.isConfigured) {
+    return {
+      success: false,
+      url: '',
+      storageType: 'direct_optimized',
+      errorType: 'BUCKET_NOT_FOUND',
+      compressedDataUrl: compressed.dataUrl,
+      compressedSizeKb: compressed.compressedSizeKb,
+      message:
+        language === 'bn'
+          ? 'Firebase Storage সক্রিয় করা নেই। নিচে সরাসরি ডাটাবেজে সংরক্ষণ করতে পারেন।'
+          : 'Firebase Storage is not configured. You can save directly to the database.',
+      setupGuideUrl: config.consoleStorageUrl,
+    };
+  }
+
+  // 4. Storage upload
+  const cleanTeamId = teamId ? teamId.replace(/[^a-zA-Z0-9_-]/g, '') : `team_${Date.now()}`;
+  const cleanSeasonId = seasonId ? seasonId.replace(/[^a-zA-Z0-9_-]/g, '') : 'season-2';
+  const filename = `logo_${cleanTeamId}_${Date.now()}.jpg`;
+  const storagePath = `teams/${cleanSeasonId}/${filename}`;
+  const storageRef = ref(storage, storagePath);
+
+  const metadata = {
+    contentType: 'image/jpeg',
+    customMetadata: {
+      teamId: cleanTeamId,
+      seasonId: cleanSeasonId,
+      uploadedAt: new Date().toISOString(),
+    },
+  };
+
+  return new Promise<UploadPhotoResult>(resolve => {
+    let taskCompleted = false;
+    let uploadTask: UploadTask;
+
+    const timeoutMs = options?.timeoutMs || 8000;
+    const timeoutTimer = setTimeout(() => {
+      if (!taskCompleted) {
+        taskCompleted = true;
+        try {
+          uploadTask?.cancel();
+        } catch (_) {}
+
+        resolve({
+          success: false,
+          url: '',
+          storageType: 'direct_optimized',
+          errorType: 'TIMEOUT',
+          compressedDataUrl: compressed.dataUrl,
+          compressedSizeKb: compressed.compressedSizeKb,
+          message:
+            language === 'bn'
+              ? 'ক্লাউড স্টোরেজে আপলোড টাইমআউট হয়েছে। আপনি সরাসরি ডাটাবেজে এটি সংরক্ষণ করতে পারেন।'
+              : 'Upload request timed out. You can save directly to the database.',
+          setupGuideUrl: config.consoleStorageUrl,
+        });
+      }
+    }, timeoutMs);
+
+    try {
+      uploadTask = uploadBytesResumable(storageRef, compressed.blob, metadata);
+
+      uploadTask.on(
+        'state_changed',
+        snapshot => {
+          if (taskCompleted) return;
+          if (snapshot.totalBytes > 0) {
+            const percent = Math.round(
+              25 + (snapshot.bytesTransferred / snapshot.totalBytes) * 70
+            );
+            options?.onProgress?.(percent);
+          }
+        },
+        storageError => {
+          if (taskCompleted) return;
+          taskCompleted = true;
+          clearTimeout(timeoutTimer);
+
+          resolve({
+            success: false,
+            url: '',
+            storageType: 'direct_optimized',
+            errorType: 'UNKNOWN_ERROR',
+            errorDetail: storageError?.message,
+            compressedDataUrl: compressed.dataUrl,
+            compressedSizeKb: compressed.compressedSizeKb,
+            message:
+              language === 'bn'
+                ? 'ক্লাউড স্টোরেজে আপলোড বিঘ্নিত হয়েছে। সরাসরি ডাটাবেজে সংরক্ষণ করা সম্ভব।'
+                : 'Storage upload interrupted.',
+            setupGuideUrl: config.consoleStorageUrl,
+          });
+        },
+        async () => {
+          if (taskCompleted) return;
+          taskCompleted = true;
+          clearTimeout(timeoutTimer);
+          options?.onProgress?.(100);
+
+          try {
+            const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
+            resolve({
+              success: true,
+              url: downloadUrl,
+              storageType: 'firebase_storage',
+              compressedSizeKb: compressed.compressedSizeKb,
+              message:
+                language === 'bn'
+                  ? `Firebase ক্লাউড স্টোরেজে সফলভাবে আপলোড হয়েছে (${compressed.compressedSizeKb} KB)`
+                  : `Uploaded successfully to Firebase Cloud Storage (${compressed.compressedSizeKb} KB)`,
+            });
+          } catch (urlErr: any) {
+            resolve({
+              success: false,
+              url: '',
+              storageType: 'direct_optimized',
+              errorType: 'UNKNOWN_ERROR',
+              errorDetail: urlErr?.message,
+              compressedDataUrl: compressed.dataUrl,
+              compressedSizeKb: compressed.compressedSizeKb,
+              message:
+                language === 'bn'
+                  ? 'ডাউনলোড লিঙ্ক সংগ্রহ করতে ব্যর্থ হয়েছে।'
+                  : 'Failed to retrieve image download URL from storage.',
+            });
+          }
+        }
+      );
+    } catch (startErr: any) {
+      if (!taskCompleted) {
+        taskCompleted = true;
+        clearTimeout(timeoutTimer);
+        resolve({
+          success: false,
+          url: '',
+          storageType: 'direct_optimized',
+          errorType: 'UNKNOWN_ERROR',
+          errorDetail: startErr?.message,
+          compressedDataUrl: compressed.dataUrl,
+          compressedSizeKb: compressed.compressedSizeKb,
+          message: startErr?.message || 'Failed to start upload task',
+        });
+      }
+    }
+  });
+}
+
+/**
+ * Saves team logo directly to Firestore team document
+ */
+export async function saveTeamLogoToFirestore(
+  teamId: string,
+  logoUrl: string
+): Promise<void> {
+  if (!teamId) return;
+  const teamRef = doc(db, 'teams', teamId);
+  await updateDoc(teamRef, {
+    logoUrl,
+    updatedAt: new Date().toISOString(),
+  });
+}

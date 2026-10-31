@@ -27,6 +27,7 @@ interface RegistrationSettingsModalProps {
   onClose: () => void;
   language: 'bn' | 'en';
   currentUserEmail?: string;
+  currentSeasonId?: string;
   onSettingsSaved?: (newSettings: RegistrationSettings) => void;
 }
 
@@ -34,9 +35,11 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
   isOpen,
   onClose,
   language,
-  currentUserEmail = 'admin',
+  currentUserEmail = '',
+  currentSeasonId = 'season-2-2026',
   onSettingsSaved,
 }) => {
+  const isSuperAdmin = (currentUserEmail || '').trim().toLowerCase() === 'arifhossainbd087@gmail.com';
   const [settings, setSettings] = useState<RegistrationSettings>(DEFAULT_REGISTRATION_SETTINGS);
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
@@ -85,13 +88,13 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
         return;
       }
 
-      const res = await checkFormNumberConflict(nextNum);
+      const res = await checkFormNumberConflict(nextNum, currentSeasonId);
       if (active) {
         if (res.hasConflict && res.conflictingPlayer) {
           setConflictWarning(
             language === 'bn'
-              ? `সতর্কতা: ফরম নং ${nextNum} ইতোমধ্যে খেলোয়াড় "${res.conflictingPlayer.name}" এর জন্য ব্যবহৃত হয়েছে!`
-              : `Warning: Form No. ${nextNum} is already assigned to player "${res.conflictingPlayer.name}"!`
+              ? `সতর্কতা: ফরম নং ${toBengaliDigits(nextNum)} (${nextNum}) ইতোমধ্যে এই সিজনে খেলোয়াড় "${res.conflictingPlayer.name}" এর জন্য ব্যবহৃত হয়েছে! অনুগ্রহ করে একটি খালি নম্বর নির্বাচন করুন।`
+              : `Warning: Form No. ${nextNum} is already assigned to player "${res.conflictingPlayer.name}" in this season!`
           );
         } else {
           setConflictWarning(null);
@@ -103,12 +106,23 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
     return () => {
       active = false;
     };
-  }, [nextNum, language]);
+  }, [nextNum, currentSeasonId, language]);
 
   const handleSave = async () => {
     setSaving(true);
     setErrorMessage(null);
     setSuccessMessage(null);
+
+    const cleanEmail = (currentUserEmail || '').trim().toLowerCase();
+    if (cleanEmail !== 'arifhossainbd087@gmail.com') {
+      setErrorMessage(
+        language === 'bn'
+          ? 'শুধুমাত্র প্রধান সুপার অ্যাডমিন (arifhossainbd087@gmail.com) ফরম সেটিংস পরিবর্তন করতে পারবেন।'
+          : 'Only the primary Super Admin (arifhossainbd087@gmail.com) can modify form settings.'
+      );
+      setSaving(false);
+      return;
+    }
 
     if (startNum < 1) {
       setErrorMessage(
@@ -130,6 +144,18 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
       return;
     }
 
+    // Direct conflict pre-check
+    const conflict = await checkFormNumberConflict(nextNum, currentSeasonId);
+    if (conflict.hasConflict && conflict.conflictingPlayer) {
+      setErrorMessage(
+        language === 'bn'
+          ? `ফরম নং ${toBengaliDigits(nextNum)} (${nextNum}) ইতোমধ্যে এই সিজনে খেলোয়াড় "${conflict.conflictingPlayer.name}" এর জন্য ব্যবহৃত হয়েছে। অনুগ্রহ করে একটি খালি নম্বর নির্বাচন করুন।`
+          : `Form No. ${nextNum} is already assigned to "${conflict.conflictingPlayer.name}". Please pick an available number.`
+      );
+      setSaving(false);
+      return;
+    }
+
     try {
       const result = await updateRegistrationSettings(
         {
@@ -140,7 +166,8 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
           labelEn: labelEn.trim() || 'Form No. ',
           digitFormat,
         },
-        currentUserEmail
+        currentUserEmail,
+        currentSeasonId
       );
 
       if (result.success && result.settings) {
@@ -232,6 +259,23 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto space-y-4 pr-1 text-xs">
+            {/* Super Admin Access Guard Banner */}
+            {!isSuperAdmin && (
+              <div className="p-3.5 rounded-2xl bg-rose-500/15 border border-rose-500/40 text-rose-300 flex items-start gap-2.5">
+                <AlertTriangle className="w-5 h-5 shrink-0 text-rose-400 mt-0.5" />
+                <div>
+                  <h4 className="font-bold text-xs text-white">
+                    {language === 'bn' ? 'অনুমতি নেই (Super Admin Only)' : 'Restricted Access'}
+                  </h4>
+                  <p className="text-[11px] text-rose-200/90 mt-0.5 leading-relaxed">
+                    {language === 'bn'
+                      ? 'শুধুমাত্র প্রধান সুপার অ্যাডমিন (arifhossainbd087@gmail.com) এই প্যানেল এক্সেস ও ফরম নম্বর পরিবর্তন করতে পারবেন।'
+                      : 'Only the primary Super Admin (arifhossainbd087@gmail.com) can access and modify form number settings.'}
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Feedback Banners */}
             {errorMessage && (
               <div className="p-3 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 flex items-center gap-2">
@@ -332,9 +376,10 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
                   <input
                     type="number"
                     min={1}
+                    disabled={!isSuperAdmin}
                     value={startNum}
                     onChange={e => setStartNum(parseInt(e.target.value, 10) || 1)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white font-mono focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white font-mono focus:outline-none focus:border-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     placeholder="1"
                   />
                   <span className="text-[10px] text-slate-500 mt-0.5 block">
@@ -349,10 +394,11 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
                   </label>
                   <input
                     type="number"
-                    min={startNum}
+                    min={1}
+                    disabled={!isSuperAdmin}
                     value={nextNum}
                     onChange={e => setNextNum(parseInt(e.target.value, 10) || 1)}
-                    className={`w-full bg-slate-950 border rounded-xl p-2.5 text-white font-mono focus:outline-none ${
+                    className={`w-full bg-slate-950 border rounded-xl p-2.5 text-white font-mono focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed ${
                       conflictWarning
                         ? 'border-amber-500 text-amber-300 focus:border-amber-400'
                         : 'border-slate-700 focus:border-emerald-500'
@@ -361,8 +407,8 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
                   />
                   <span className="text-[10px] text-slate-500 mt-0.5 block">
                     {language === 'bn'
-                      ? 'স্বয়ংক্রিয়ভাবে প্রতি নিবন্ধনে +১ বাড়বে'
-                      : 'Auto-increments by 1 on each registration'}
+                      ? 'সুপার অ্যাডমিন যেকোনো ধনাত্মক সংখ্যা (যেমন: ৩, ৮, ৪১, ৫০) নির্ধারণ করতে পারেন'
+                      : 'Super Admin can set any positive number (e.g. 3, 8, 41, 50)'}
                   </span>
                 </div>
               </div>
@@ -447,8 +493,9 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
         <div className="border-t border-slate-800 pt-3 flex items-center justify-between gap-2">
           <button
             type="button"
+            disabled={!isSuperAdmin}
             onClick={handleResetToDefault}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors text-xs font-medium cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs font-medium cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>{language === 'bn' ? 'রিসেট (Form 1)' : 'Reset Default'}</span>
@@ -466,8 +513,8 @@ export const RegistrationSettingsModal: React.FC<RegistrationSettingsModalProps>
             <button
               type="button"
               onClick={handleSave}
-              disabled={saving || loading}
-              className="flex items-center gap-1.5 px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white text-xs font-bold shadow-md shadow-emerald-950 transition-all cursor-pointer"
+              disabled={saving || loading || !isSuperAdmin}
+              className="flex items-center gap-1.5 px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-emerald-950 transition-all cursor-pointer"
             >
               <Save className="w-3.5 h-3.5" />
               <span>

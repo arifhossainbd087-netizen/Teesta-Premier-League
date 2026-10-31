@@ -27,6 +27,7 @@ import { updateSeasonField, updatePlayerField } from '../services/editService';
 import {
   DEFAULT_REGISTRATION_SETTINGS,
   formatFormDisplay,
+  parseNumericFormValue,
 } from '../services/registrationService';
 import { RegistrationSettingsModal } from './RegistrationSettingsModal';
 
@@ -36,7 +37,9 @@ interface FeeAndRefundReportProps {
 }
 
 export const FeeAndRefundReport: React.FC<FeeAndRefundReportProps> = ({ players, currentSeason }) => {
-  const { isAdmin, language, currentUser } = useAuth();
+  const { isAdmin, isSuperAdmin, language, currentUser } = useAuth();
+  const isSuperAdminEmail =
+    isSuperAdmin || (currentUser?.email || '').trim().toLowerCase() === 'arifhossainbd087@gmail.com';
 
   const [statusFilter, setStatusFilter] = useState<'all' | 'Paid' | 'Pending' | 'Refunded'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -44,11 +47,25 @@ export const FeeAndRefundReport: React.FC<FeeAndRefundReportProps> = ({ players,
   const [isRegSettingsModalOpen, setIsRegSettingsModalOpen] = useState(false);
 
   useEffect(() => {
+    // Read local cache first for instant display
+    try {
+      const cached = localStorage.getItem('tpl_cached_settings');
+      if (cached) {
+        setRegSettings({ ...DEFAULT_REGISTRATION_SETTINGS, ...JSON.parse(cached) });
+      }
+    } catch {}
+
+    if (!isAdmin) return;
+
     const unsub = onSnapshot(
       doc(db, 'settings', 'registration'),
       snap => {
         if (snap.exists()) {
-          setRegSettings({ ...DEFAULT_REGISTRATION_SETTINGS, ...(snap.data() as RegistrationSettings) });
+          const data = { ...DEFAULT_REGISTRATION_SETTINGS, ...(snap.data() as RegistrationSettings) };
+          setRegSettings(data);
+          try {
+            localStorage.setItem('tpl_cached_settings', JSON.stringify(data));
+          } catch {}
         }
       },
       err => {
@@ -56,7 +73,7 @@ export const FeeAndRefundReport: React.FC<FeeAndRefundReportProps> = ({ players,
       }
     );
     return () => unsub();
-  }, []);
+  }, [isAdmin]);
 
   // Authoritative standard registration fee for the current season
   const standardFee = typeof currentSeason?.regFeeAmount === 'number' ? currentSeason.regFeeAmount : 500;
@@ -108,6 +125,19 @@ export const FeeAndRefundReport: React.FC<FeeAndRefundReportProps> = ({ players,
       if (!matchName && !matchPhone && !matchTrx) return false;
     }
     return true;
+  }).sort((a, b) => {
+    const numA =
+      typeof a.formNumericValue === 'number' && a.formNumericValue > 0
+        ? a.formNumericValue
+        : parseNumericFormValue(a.formNumber);
+    const numB =
+      typeof b.formNumericValue === 'number' && b.formNumericValue > 0
+        ? b.formNumericValue
+        : parseNumericFormValue(b.formNumber);
+    if (numA > 0 && numB > 0) return numA - numB;
+    if (numA > 0) return -1;
+    if (numB > 0) return 1;
+    return (a.createdAt || '').localeCompare(b.createdAt || '');
   });
 
   const handleUpdatePaymentStatus = async (
@@ -344,13 +374,15 @@ export const FeeAndRefundReport: React.FC<FeeAndRefundReportProps> = ({ players,
               </div>
             </div>
 
-            <button
-              onClick={() => setIsRegSettingsModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
-            >
-              <Settings className="w-3.5 h-3.5 text-amber-400" />
-              <span>{language === 'bn' ? 'ফরম সেটিংস পরিবর্তন' : 'Configure Settings'}</span>
-            </button>
+            {isSuperAdminEmail && (
+              <button
+                onClick={() => setIsRegSettingsModalOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <Settings className="w-3.5 h-3.5 text-amber-400" />
+                <span>{language === 'bn' ? 'ফরম সেটিংস পরিবর্তন' : 'Configure Settings'}</span>
+              </button>
+            )}
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-900 text-[11px]">
@@ -636,13 +668,14 @@ export const FeeAndRefundReport: React.FC<FeeAndRefundReportProps> = ({ players,
         </div>
       </div>
 
-      {/* Admin Registration Settings Modal */}
-      {isAdmin && (
+      {/* Super Admin Registration Settings Modal */}
+      {isSuperAdminEmail && (
         <RegistrationSettingsModal
           isOpen={isRegSettingsModalOpen}
           onClose={() => setIsRegSettingsModalOpen(false)}
           language={language}
-          currentUserEmail={currentUser?.email || 'admin'}
+          currentUserEmail={currentUser?.email || ''}
+          currentSeasonId={currentSeason?.id || 'season-2-2026'}
           onSettingsSaved={newSettings => setRegSettings(newSettings)}
         />
       )}

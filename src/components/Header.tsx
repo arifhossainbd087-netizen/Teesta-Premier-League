@@ -3,6 +3,7 @@ import {
   Trophy,
   Users,
   Shield,
+  ShieldCheck,
   FileSpreadsheet,
   History,
   HelpCircle,
@@ -16,6 +17,8 @@ import {
   Calendar,
   Layers,
   Settings,
+  Maximize2,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { useAuth, BOOTSTRAP_ADMIN_EMAIL } from '../context/AuthContext';
 import { Team, UserRole, Season } from '../types';
@@ -35,6 +38,7 @@ interface HeaderProps {
   onOpenLoginModal: () => void;
   onSeedData: () => void;
   auctionLive: boolean;
+  onOpenProjectorBoard?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -49,11 +53,15 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenLoginModal,
   onSeedData,
   auctionLive,
+  onOpenProjectorBoard,
 }) => {
   const {
     currentUser,
     userRole,
     isAdmin,
+    isSuperAdmin,
+    isPrimaryAdmin,
+    verifiedAdminRole,
     activeTeam,
     logout,
     setTestSimulatedRole,
@@ -65,8 +73,15 @@ export const Header: React.FC<HeaderProps> = ({
   const [showRoleMenu, setShowRoleMenu] = useState(false);
   const [showSeasonMenu, setShowSeasonMenu] = useState(false);
 
+  const canSwitchRole =
+    !!currentUser &&
+    (verifiedAdminRole === 'primary' ||
+      verifiedAdminRole === 'assistant' ||
+      (currentUser.email || '').trim().toLowerCase() === BOOTSTRAP_ADMIN_EMAIL.toLowerCase());
+
   const currentSeason = seasons.find(s => s.id === currentSeasonId) || seasons[0];
 
+  // Dynamically configure accessible navigation tabs strictly based on verified user role
   const navItems = [
     {
       id: 'auction',
@@ -75,17 +90,38 @@ export const Header: React.FC<HeaderProps> = ({
       badge: auctionLive ? (language === 'bn' ? 'লাইভ' : 'LIVE') : null,
     },
     {
-      id: 'players',
-      label: language === 'bn' ? 'খেলোয়াড় তালিকা' : 'Players',
-      icon: Users,
+      id: 'lineup',
+      label: language === 'bn' ? 'স্কোয়াড ও লাইনআপ' : 'Squad & Lineup',
+      icon: Trophy,
     },
     {
-      id: 'teams',
-      label: language === 'bn' ? 'দল ও বাজেট' : 'Teams & Purse',
-      icon: Shield,
+      id: 'posters',
+      label: language === 'bn' ? 'পোস্টার গ্যালারি' : 'Poster Gallery',
+      icon: ImageIcon,
     },
+    // Players & Teams tabs are restricted to Team Managers and Authorized Admins ONLY
+    ...(userRole === 'team' || isAdmin
+      ? [
+          {
+            id: 'players',
+            label: language === 'bn' ? 'খেলোয়াড় তালিকা' : 'Players',
+            icon: Users,
+          },
+          {
+            id: 'teams',
+            label: language === 'bn' ? 'দল ও বাজেট' : 'Teams & Purse',
+            icon: Shield,
+          },
+        ]
+      : []),
+    // Admin management, financial reports, audit logs, and setup guide are restricted to Admins ONLY
     ...(isAdmin
       ? [
+          {
+            id: 'admin-management',
+            label: language === 'bn' ? 'অ্যাডমিন ম্যানেজমেন্ট' : 'Admin Management',
+            icon: ShieldCheck,
+          },
           {
             id: 'fees',
             label: language === 'bn' ? 'ফি ও রিফান্ড' : 'Fee Records',
@@ -96,13 +132,13 @@ export const Header: React.FC<HeaderProps> = ({
             label: language === 'bn' ? 'অডিট লগ' : 'Audit Logs',
             icon: History,
           },
+          {
+            id: 'guide',
+            label: language === 'bn' ? 'সেটআপ ও নির্দেশিকা' : 'Setup Guide',
+            icon: HelpCircle,
+          },
         ]
       : []),
-    {
-      id: 'guide',
-      label: language === 'bn' ? 'সেটআপ ও নির্দেশিকা' : 'Setup Guide',
-      icon: HelpCircle,
-    },
   ];
 
   return (
@@ -301,6 +337,18 @@ export const Header: React.FC<HeaderProps> = ({
               <span>{language === 'bn' ? 'খেলোয়াড় নিবন্ধন' : 'Register Player'}</span>
             </button>
 
+            {/* Public View / Projector Board Quick Button */}
+            {onOpenProjectorBoard && (
+              <button
+                onClick={onOpenProjectorBoard}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600/20 to-blue-600/20 hover:from-cyan-600/35 hover:to-blue-600/35 text-cyan-300 border border-cyan-500/40 text-xs font-bold transition-all cursor-pointer shadow-sm hover:border-cyan-400"
+                title={language === 'bn' ? 'পাবলিক ভিউ / প্রজেক্টর ভিউ (ফুলস্ক্রিন ব্রডকাস্ট)' : 'Public View / Projector View (Fullscreen Broadcast)'}
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="hidden sm:inline">{language === 'bn' ? 'পাবলিক / প্রজেক্টর ভিউ' : 'Public / Projector View'}</span>
+              </button>
+            )}
+
             {/* Language Toggle */}
             <button
               onClick={() => setLanguage(language === 'bn' ? 'en' : 'bn')}
@@ -310,112 +358,206 @@ export const Header: React.FC<HeaderProps> = ({
               {language === 'bn' ? 'ENG' : 'বাং'}
             </button>
 
-            {/* Quick Testing Role Switcher */}
-            <div className="relative">
-              <button
-                onClick={() => setShowRoleMenu(!showRoleMenu)}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer ${
-                  isAdmin
-                    ? 'bg-purple-950/40 border-purple-500/40 text-purple-300 hover:bg-purple-900/50'
-                    : userRole === 'team'
-                    ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/50'
-                    : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-                }`}
-                title="রোল নির্বাচন / Role Selector"
-              >
-                <UserCheck className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">
-                  {isAdmin
-                    ? language === 'bn'
-                      ? 'অ্যাডমিন মোড'
-                      : 'Admin'
-                    : userRole === 'team' && activeTeam
-                    ? activeTeam.name.split(' ')[0]
-                    : language === 'bn'
-                    ? 'দর্শক'
-                    : 'Viewer'}
-                </span>
-                <span className="sm:hidden">
-                  {isAdmin ? 'Admin' : userRole === 'team' ? 'Team' : 'View'}
-                </span>
-                <ChevronDown className="w-3 h-3 text-slate-400" />
-              </button>
+            {/* Verified Auth Role Badge & Interactive Dropdown Controls */}
+            {currentUser ? (
+              <div className="relative">
+                {canSwitchRole ? (
+                  <>
+                    <button
+                      onClick={() => setShowRoleMenu(!showRoleMenu)}
+                      className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all cursor-pointer ${
+                        userRole === 'admin'
+                          ? isSuperAdmin || verifiedAdminRole === 'primary'
+                            ? 'bg-amber-950/60 border-amber-500/50 text-amber-300 shadow-sm shadow-amber-950'
+                            : 'bg-teal-950/60 border-teal-500/50 text-teal-300 shadow-sm shadow-teal-950'
+                          : userRole === 'team'
+                          ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300 shadow-sm shadow-emerald-950'
+                          : 'bg-blue-950/60 border-blue-500/50 text-blue-300 shadow-sm shadow-blue-950'
+                      }`}
+                      title={language === 'bn' ? 'রোল ও দৃষ্টিকোণ পরিবর্তন করুন' : 'Switch Role & Perspective'}
+                    >
+                      {userRole === 'admin' ? (
+                        isSuperAdmin || verifiedAdminRole === 'primary' ? (
+                          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5 text-teal-400" />
+                        )
+                      ) : userRole === 'team' ? (
+                        <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                      ) : (
+                        <UserCheck className="w-3.5 h-3.5 text-cyan-400" />
+                      )}
 
-              {/* Role Dropdown */}
-              {showRoleMenu && (
-                <div className="absolute right-0 mt-2 w-64 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-top-2">
-                  <div className="px-2 py-1.5 text-[11px] font-semibold text-slate-400 border-b border-slate-800">
-                    {language === 'bn' ? 'টেস্টিং রোল নির্বাচন করুন:' : 'Testing Role:'}
-                  </div>
+                      <span className="hidden sm:inline">
+                        {userRole === 'admin'
+                          ? isSuperAdmin || verifiedAdminRole === 'primary'
+                            ? (language === 'bn' ? 'সুপার অ্যাডমিন' : 'Super Admin')
+                            : (language === 'bn' ? 'সহকারী অ্যাডমিন' : 'Assistant Admin')
+                          : userRole === 'team'
+                          ? `${activeTeam ? activeTeam.name : (language === 'bn' ? 'দল ম্যানেজার' : 'Team Manager')} (${language === 'bn' ? 'প্রিভিউ' : 'Preview'})`
+                          : `${language === 'bn' ? 'পাবলিক ভিউ' : 'Public View'} (${language === 'bn' ? 'প্রিভিউ' : 'Preview'})`}
+                      </span>
+                      <span className="sm:hidden">
+                        {userRole === 'admin'
+                          ? isSuperAdmin || verifiedAdminRole === 'primary' ? 'Super' : 'Admin'
+                          : userRole === 'team'
+                          ? 'Team'
+                          : 'Public'}
+                      </span>
+                      <ChevronDown className="w-3 h-3 text-slate-400" />
+                    </button>
 
-                  {/* Option 1: Admin */}
-                  <button
-                    onClick={() => {
-                      setTestSimulatedRole('admin', null);
-                      setShowRoleMenu(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-2 mt-1 rounded-lg text-xs flex items-center justify-between cursor-pointer ${
-                      isAdmin ? 'bg-purple-600/30 text-purple-200' : 'hover:bg-slate-800 text-slate-200'
-                    }`}
-                  >
-                    <div>
-                      <div className="font-semibold text-purple-300">
-                        {language === 'bn' ? 'অ্যাডমিনিস্ট্রেটর' : 'Administrator'}
-                      </div>
-                      <div className="text-[10px] text-slate-400">{BOOTSTRAP_ADMIN_EMAIL}</div>
-                    </div>
-                    {isAdmin && <span className="text-[10px] bg-purple-500/30 text-purple-300 px-1.5 py-0.5 rounded">Active</span>}
-                  </button>
-
-                  {/* Team Options */}
-                  <div className="px-2 pt-2 text-[10px] uppercase tracking-wider text-slate-400">
-                    {language === 'bn' ? 'দলের ম্যানেজার হিসেবে বিড টেস্ট:' : 'Test As Team:'}
-                  </div>
-                  {teams.length === 0 ? (
-                    <div className="px-2 py-1 text-xs text-slate-500 italic">
-                      {language === 'bn' ? 'এই সিজনে কোনো দল নেই' : 'No teams in this season'}
-                    </div>
-                  ) : (
-                    teams.slice(0, 5).map(team => (
-                      <button
-                        key={team.id}
-                        onClick={() => {
-                          setTestSimulatedRole('team', team);
-                          setShowRoleMenu(false);
-                        }}
-                        className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between cursor-pointer ${
-                          userRole === 'team' && activeTeam?.id === team.id
-                            ? 'bg-emerald-600/30 text-emerald-200'
-                            : 'hover:bg-slate-800 text-slate-300'
-                        }`}
-                      >
-                        <div className="truncate pr-2">
-                          <span className="font-medium">{team.name}</span>
+                    {/* Role & Perspective Switcher Dropdown (Accessible to authenticated administrators) */}
+                    {showRoleMenu && (
+                      <div className="absolute right-0 mt-2 w-72 sm:w-80 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-2.5 z-50 animate-in fade-in slide-in-from-top-2">
+                        <div className="px-2 py-1.5 text-[11px] font-semibold text-slate-400 border-b border-slate-800 flex items-center justify-between">
+                          <span>{language === 'bn' ? 'প্রশাসনিক অ্যাকাউন্ট:' : 'Administrative Account:'}</span>
+                          <span className="text-[10px] text-amber-400 font-bold uppercase font-mono">
+                            {verifiedAdminRole === 'primary' ? 'Super Admin' : 'Admin'}
+                          </span>
                         </div>
-                        <span className="text-[10px] text-emerald-400 font-mono">
-                          ৳{(team.remainingBudget / 1000).toFixed(0)}k
-                        </span>
-                      </button>
-                    ))
-                  )}
+                        <div className="px-2 py-1.5 text-xs text-amber-300 font-mono truncate">
+                          {currentUser.email}
+                        </div>
 
-                  {/* Viewer option */}
-                  <button
-                    onClick={() => {
-                      setTestSimulatedRole('viewer', null);
-                      setShowRoleMenu(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 mt-1 rounded-lg text-xs cursor-pointer ${
-                      userRole === 'viewer'
-                        ? 'bg-slate-800 text-amber-300'
-                        : 'hover:bg-slate-800 text-slate-400'
-                    }`}
+                        <div className="space-y-1.5 pt-1">
+                          {/* Option 1: Super Admin / Admin Mode */}
+                          <button
+                            onClick={() => {
+                              setTestSimulatedRole('admin', null, verifiedAdminRole === 'primary');
+                              setShowRoleMenu(false);
+                              setActiveTab('auction');
+                            }}
+                            className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between cursor-pointer transition-all ${
+                              userRole === 'admin'
+                                ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40 font-bold shadow-sm'
+                                : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              {verifiedAdminRole === 'primary' ? (
+                                <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                              ) : (
+                                <ShieldCheck className="w-4 h-4 text-teal-400 shrink-0" />
+                              )}
+                              <div>
+                                <div className="font-bold">
+                                  {verifiedAdminRole === 'primary'
+                                    ? (language === 'bn' ? 'সুপার অ্যাডমিন মোড' : 'Super Admin Mode')
+                                    : (language === 'bn' ? 'অ্যাডমিন মোড' : 'Admin Mode')}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  {language === 'bn' ? 'পূর্ণাঙ্গ প্রশাসনিক নিয়ন্ত্রণ ও সমস্ত সেটিংস' : 'Full administrative controls'}
+                                </div>
+                              </div>
+                            </div>
+                            {userRole === 'admin' && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/30 text-amber-300 font-mono font-bold">
+                                Active
+                              </span>
+                            )}
+                          </button>
+
+                          {/* Option 2: Public View (General Viewer) */}
+                          <button
+                            onClick={() => {
+                              setTestSimulatedRole('viewer');
+                              setShowRoleMenu(false);
+                              setActiveTab('auction');
+                            }}
+                            className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between cursor-pointer transition-all ${
+                              userRole === 'viewer'
+                                ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-500/40 font-bold shadow-sm'
+                                : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <PlayCircle className="w-4 h-4 text-cyan-400 shrink-0" />
+                              <div>
+                                <div className="font-bold">
+                                  {language === 'bn' ? 'পাবলিক ভিউ (সাধারণ দর্শক)' : 'Public View (General Viewer)'}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  {language === 'bn' ? 'শুধুমাত্র লাইভ নিলাম স্টেজ (পাবলিক)' : 'Live auction stage only'}
+                                </div>
+                              </div>
+                            </div>
+                            {userRole === 'viewer' && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/30 text-cyan-300 font-mono font-bold">
+                                Active
+                              </span>
+                            )}
+                          </button>
+
+                          {/* Section 3: Team Manager Perspectives */}
+                          <div className="pt-2 border-t border-slate-800">
+                            <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                              <span>{language === 'bn' ? 'দলের দৃষ্টিকোণ থেকে প্রিভিউ:' : 'Preview As Team Manager:'}</span>
+                              <span className="text-[10px] text-slate-500 font-mono">{teams.length}টি দল</span>
+                            </div>
+
+                            <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
+                              {teams.length === 0 ? (
+                                <div className="px-2 py-2 text-xs text-slate-500 italic">
+                                  {language === 'bn' ? 'এই সিজনে কোনো দল নেই' : 'No teams in this season'}
+                                </div>
+                              ) : (
+                                teams.map(team => (
+                                  <button
+                                    key={team.id}
+                                    onClick={() => {
+                                      setTestSimulatedRole('team', team);
+                                      setShowRoleMenu(false);
+                                      setActiveTab('auction');
+                                    }}
+                                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between cursor-pointer transition-colors ${
+                                      userRole === 'team' && activeTeam?.id === team.id
+                                        ? 'bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 font-bold'
+                                        : 'hover:bg-slate-800 text-slate-300'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 truncate pr-2">
+                                      <span
+                                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                                        style={{ backgroundColor: team.color || '#10b981' }}
+                                      />
+                                      <span className="truncate">{team.name}</span>
+                                    </div>
+                                    <span className="text-[10px] text-emerald-400 font-mono shrink-0">
+                                      {formatBDT(team.remainingBudget)}
+                                    </span>
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : userRole === 'team' ? (
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 text-emerald-300 text-xs font-semibold"
+                    title={currentUser.email || 'Team Manager'}
                   >
-                    {language === 'bn' ? 'সাধারণ দর্শক (Public Viewer)' : 'Public Viewer'}
-                  </button>
-                </div>
-              )}
-            </div>
+                    <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="hidden sm:inline">
+                      {activeTeam ? activeTeam.name : (language === 'bn' ? 'দল ম্যানেজার' : 'Team Manager')}
+                    </span>
+                    <span className="sm:hidden">Team</span>
+                  </div>
+                ) : (
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 text-xs font-medium"
+                    title={currentUser.email || 'Viewer'}
+                  >
+                    <UserCheck className="w-3.5 h-3.5 text-slate-400" />
+                    <span className="hidden sm:inline">{language === 'bn' ? 'দর্শক' : 'Viewer'}</span>
+                    <span className="sm:hidden">View</span>
+                  </div>
+                )}
+              </div>
+            ) : null}
 
             {/* Auth Action Button */}
             {currentUser ? (
